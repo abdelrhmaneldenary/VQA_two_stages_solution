@@ -193,7 +193,7 @@ def main():
             # 3. Geometry
             final_masks, _ = stage2.generate_masks(item["resolved_image_path"], bimodal_tuples)
 
-            # 4. Topology
+# 4. Topology
             prediction, d_score = stage3.evaluate(final_masks)
             ground_truth = 1 if item.get("binary_label") == "single" else 0
             
@@ -201,11 +201,36 @@ def main():
             y_pred.append(prediction)
             y_true.append(ground_truth)
             sources.append(item.get("source", "Unknown"))
-            
-            # To plot PR-AUC for the "Single" class (Label 1), we need confidence it is Single.
-            # d_score measures Divergence (Multiple). So Single Confidence = 1.0 - d_score.
             y_scores.append(1.0 - d_score)
             
+            # ==========================================
+            # 🔍 THE ENGINEERING HEARTBEAT (LIVE LOGGING)
+            # ==========================================
+            pred_text = "Single" if prediction == 1 else "Multiple"
+            true_text = "Single" if ground_truth == 1 else "Multiple"
+            
+            # 1. Stage 1 (Semantics) - What did Qwen see?
+            candidate_words = [c[0] for c in candidates]
+            print(f"   -> 🧠 Stage 1 (Semantics): {candidate_words}")
+            
+            # 2. Bridge (Translation) - Is the Logit Math working?
+            # We check the first bimodal tuple to ensure the logit prior isn't dead
+            if bimodal_tuples:
+                sample_logit = bimodal_tuples[0][1]
+                print(f"   -> 🌉 Latent Bridge     : Logit Range [{sample_logit.min().item():.2f} to {sample_logit.max().item():.2f}]")
+            
+            # 3. Stage 2 (Geometry) - Did SAM 3 actually draw anything?
+            valid_masks = [m for m in final_masks if np.any(m)]
+            print(f"   -> 📐 Stage 2 (Geometry) : {len(valid_masks)}/{len(final_masks)} masks contain valid pixels.")
+            
+            # 4. Stage 3 (Topology) - The Final Verdict
+            if prediction == ground_truth:
+                print(f"   -> ✅ MATCH | D_Score: {d_score:.3f} | Pred: {pred_text} | True: {true_text}")
+            else:
+                print(f"   -> ❌ FAIL  | D_Score: {d_score:.3f} | Pred: {pred_text} | True: {true_text}")
+            print("-" * 50)
+            # ==========================================
+
             # Save 5 topological visualizations where D_score proved divergence
             if d_score > 0.4 and saved_viz_count < 5:
                 save_topology_visualization(item["resolved_image_path"], final_masks, d_score, CONFIG["run_id"], idx, artifact_dir)
