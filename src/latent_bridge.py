@@ -97,27 +97,24 @@ class LatentBridge:
                 ).squeeze() 
                 
             
-                # ==========================================
-                # 🌉 Z-SCORE SPATIAL CALIBRATION
-                # ==========================================
-                # 1. Calculate the statistical mean and spread of the attention
-                mean_val = attn_grid_256.mean()
-                std_val = attn_grid_256.std()
-                
-                # 2. Z-Score Standardization
-                # This shifts the average pixel to 0.0. 
-                # Background becomes negative. The object body becomes positive.
-                if std_val > 1e-6:
-                    z_scored_attn = (attn_grid_256 - mean_val) / std_val
-                else:
-                    z_scored_attn = attn_grid_256 - mean_val
-                    
-                # 3. Scale to SAM 3's Native Logit Range
-                # We multiply by 3.0 to stretch the Z-scores into a booming [-10 to +10] range.
-                # No clamped Log-Odds math required! This IS the logit tensor.
-                dense_logit_prior = z_scored_attn * 3.0
-                # ==========================================
 
-                bimodal_tuples.append((str(candidate_text), dense_logit_prior))
+            
+            mean_val = attn_grid_256.mean()
+            std_val = attn_grid_256.std()
+            
+            if std_val > 1e-6:
+                z_scored_attn = (attn_grid_256 - mean_val) / std_val
+            else:
+                z_scored_attn = attn_grid_256 - mean_val
+                
+            dense_logit_prior = z_scored_attn * 3.0
+            
+            # --- THE NEURAL CLAMP ---
+            # Prevents the "37.08 Bomb". Caps the foreground at +5.0 (99% confidence)
+            # and the background at -5.0, keeping SAM's convolutions mathematically stable.
+            dense_logit_prior = torch.clamp(dense_logit_prior, min=-5.0, max=5.0)
+            # ==========================================
+
+            bimodal_tuples.append((str(candidate_text), dense_logit_prior))
                 
             return bimodal_tuples
