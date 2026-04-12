@@ -18,7 +18,9 @@ from src.latent_bridge import LatentBridge
 from src.stage_2_segmentor import Stage2Segmentor
 from src.stage_3_topology import TopologicalEvaluator
 from src.config import CONFIG
-
+import os
+# Tells PyTorch to be smarter about memory blocks to prevent fragmentation crashes
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 # ==========================================
 # Artifact & Visualization Helpers
 # ==========================================

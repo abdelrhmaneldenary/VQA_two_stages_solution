@@ -21,7 +21,7 @@ class Stage1Generator:
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
             model_id,
             quantization_config=bnb_config,
-            device_map="auto",
+            device_map="cuda:1",  # <--- Moved entirely to GPU 1
             attn_implementation="eager" # Required to allow output_attentions
         )
         # ----------------------------------------------------
@@ -55,7 +55,7 @@ class Stage1Generator:
         # 1. Standard Prompting
         prompt_text = (f"{context_string}Target Image Analysis:\nQuestion: '{question}'\nPlausible Visual Answers:")
         messages = [{"role": "user", "content": [
-            {"type": "image", "image": image_path, "max_pixels": 313600},
+            {"type": "image", "image": image_path, "max_pixels": 156800},
             {"type": "text", "text": prompt_text}
         ]}]
 
