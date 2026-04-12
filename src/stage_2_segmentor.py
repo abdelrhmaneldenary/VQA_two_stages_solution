@@ -1,19 +1,19 @@
 import torch
 import numpy as np
+import cv2
 from PIL import Image
-from transformers import AutoProcessor, AutoModelForMaskGeneration
+from transformers import Sam2Model, Sam2Processor
 
 class Stage2Segmentor:
-    def __init__(self, model_id="facebook/sam3-base"):
+    def __init__(self, model_id="facebook/sam2.1-hiera-large"):
         """
-        Initializes SAM 3. We load this in bfloat16 to optimize VRAM usage.
-        Because SAM 3 is primarily a vision encoder/decoder, 16-bit precision 
-        maintains perfect geometric accuracy without the memory footprint of FP32.
+        Initializes SAM 2.1. This is the 'Hiera' architecture.
+        It is faster and more memory-efficient than SAM-ViT-Huge.
         """
-        print(f"Loading Stage 2 Geometric Engine: {model_id}")
-        self.processor = AutoProcessor.from_pretrained(model_id)
+        print(f"Loading Stage 2 Geometric Engine (SAM 2.1): {model_id}")
         
-        self.model = AutoModelForMaskGeneration.from_pretrained(
+        self.processor = Sam2Processor.from_pretrained(model_id)
+        self.model = Sam2Model.from_pretrained(
             model_id,
             torch_dtype=torch.bfloat16,
             device_map="auto"
@@ -22,54 +22,56 @@ class Stage2Segmentor:
 
     def generate_masks(self, image_path, bimodal_tuples):
         """
-        Takes the original image and the bimodal tuples (text, logit_prior) 
-        and returns the final binary masks and their SAM-predicted IoU scores.
+        Uses Qwen's logit heatmaps as 'mask prompts' for SAM 2.
         """
         raw_image = Image.open(image_path).convert("RGB")
+        width, height = raw_image.size
         
         final_masks = []
         mask_scores = []
         
         for candidate_text, dense_logit_prior in bimodal_tuples:
-            # 1. Formatting the Dense Mask Prompt
-            # SAM 3 expects dense prompts to have a channel dimension: (1, 256, 256)
-            dense_prompt_tensor = dense_logit_prior.unsqueeze(0)
+            # 1. Prepare the mask prompt (SAM 2 expects 256x256 logits)
+            # We unsqueeze to add batch and object dimensions: [1, 1, 256, 256]
+            input_masks = dense_logit_prior.unsqueeze(0).unsqueeze(0)
             
-            # 2. Synergistic Bimodal Prompting
-            # We pass BOTH the text and the Qwen-derived logit matrix
+            # 2. Process inputs for SAM 2
+            # Note: We provide the original image and the mask prompt.
             inputs = self.processor(
-                images=raw_image,
-                text=[candidate_text],
-                dense_prompts=[dense_prompt_tensor],
+                images=raw_image, 
+                mask_input=input_masks, 
                 return_tensors="pt"
             ).to(self.model.device, dtype=torch.bfloat16)
 
-            # 3. Single Forward Pass (Zero-Shot Grounding)
+            # 3. Forward Pass
             with torch.no_grad():
                 outputs = self.model(**inputs)
 
-            # 4. Extracting the Logits and Scores
-            # SAM 3 typically outputs 3 levels of mask granularity (whole, part, subpart)
-            # Shape is usually (batch_size, num_masks, H, W)
-            pred_masks_logits = outputs.pred_masks.squeeze(0) 
-            iou_scores = outputs.iou_scores.squeeze(0)
+            # 4. Post-processing for SAM 2
+            # SAM 2 outputs masks at a lower resolution; we must upscale to the original image size.
+            masks = outputs.pred_masks.squeeze(0).squeeze(0) # [3, 256, 256]
+            iou_scores = outputs.iou_scores.squeeze()        # [3]
 
-            # 5. Granularity Selection
-            # We trust SAM 3's internal confidence metric to select the best geometric fit
-            best_mask_idx = torch.argmax(iou_scores)
-            best_mask_logits = pred_masks_logits[best_mask_idx]
-            best_score = iou_scores[best_mask_idx].item()
-
-            # 6. The Native Zero-Level Threshold
-            # Converts the continuous logit output into a strict binary polygon (1s and 0s)
-            # We do NOT use a 0.4 threshold here. Logit math naturally pivots at 0.0.
-            binary_mask = (best_mask_logits > 0.0).cpu().numpy()
-
-            final_masks.append(binary_mask)
-            mask_scores.append(best_score)
+            # 5. Best Mask Selection (Granularity handling)
+            best_idx = torch.argmax(iou_scores)
+            best_mask_logits = masks[best_idx]
             
-            # Explicitly free memory inside the loop
-            del inputs, outputs, pred_masks_logits, iou_scores
+            # 6. Binary Threshold & Upscale
+            # We move to CPU and convert to uint8 for high-speed OpenCV resizing
+            mask_np = (best_mask_logits > 0.0).cpu().numpy().astype(np.uint8)
+            
+            # Upscale to match the exact original image resolution for Stage 3 math
+            final_binary_mask = cv2.resize(
+                mask_np, 
+                (width, height), 
+                interpolation=cv2.INTER_NEAREST
+            ).astype(bool)
+
+            final_masks.append(final_binary_mask)
+            mask_scores.append(iou_scores[best_idx].item())
+            
+            # Memory Hygiene
+            del inputs, outputs
             torch.cuda.empty_cache()
 
         return final_masks, mask_scores
