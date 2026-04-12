@@ -89,7 +89,8 @@ class Stage1Generator:
                 num_beam_groups=num_beams,         # Required to activate DBS in HuggingFace
                 diversity_penalty=diversity_penalty, # The Lambda parameter from our CSV
                 return_dict_in_generate=True,      # Forces output as a dictionary, not just a tensor
-                output_attentions=True             # CRITICAL: Exposes the hidden cross-attention maps!
+                output_attentions=True ,            # CRITICAL: Exposes the hidden cross-attention maps!
+                do_sample=False
             )
 
         # 4. Parse the output text into a Python list
