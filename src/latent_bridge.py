@@ -22,51 +22,40 @@ class LatentBridge:
         return logits * self.logit_scale_factor
 
     def _extract_and_reshape_attention(self, all_steps_attentions, image_token_start, image_token_end, seq_idx=0):
-        # 1. FOOLPROOF TUPLE FILTERING
-        # group-beam-search inserts empty tuples during beam transitions. We filter them out.
-        valid_steps = [s for s in all_steps_attentions if isinstance(s, tuple) and len(s) > 0]
-        if not valid_steps:
-            raise ValueError("❌ Attention tensors are entirely empty!")
+        # 1. Access the captured tensor
+        # Our hook returned: [ (attention_tensor,) ]
+        if not all_steps_attentions or len(all_steps_attentions) == 0:
+            raise ValueError("❌ Latent Bridge received NULL attention from the Semantic Brain!")
+            
+        # Grab the last layer from the final step
+        last_step_tensor = all_steps_attentions[-1][0] 
+        # Shape: (Batch * Beams, Heads, Q_Seq, K_Seq)
 
-        # 2. Get the last valid step, and the last transformer layer
-        last_step = valid_steps[-1]
-        last_layer_attn = last_step[-1] 
-
-        # 3. Handle Beam Search Batching (Crucial for DBS!)
-        # Shape is usually (batch * num_beams, num_heads, seq_len_q, seq_len_k)
-        # We select the specific sequence index to get its unique attention!
-        if last_layer_attn.shape[0] > seq_idx:
-            beam_attn = last_layer_attn[seq_idx]
+        # 2. Slice the correct Beam
+        if last_step_tensor.shape[0] > seq_idx:
+            beam_attn = last_step_tensor[seq_idx]
         else:
-            beam_attn = last_layer_attn[0]
+            beam_attn = last_step_tensor[0]
 
-        # 4. Average across heads
-        avg_attn = beam_attn.mean(dim=0)
+        # 3. Average across heads
+        avg_attn = beam_attn.mean(dim=0) # (Q_Seq, K_Seq)
 
-        # 5. Extract what the final generated token is looking at
-        if avg_attn.dim() == 2:
-            focus_attn = avg_attn[-1, :]
-        else:
-            focus_attn = avg_attn
+        # 4. Focus: What is the VERY LAST generated token looking at?
+        # In a full-sequence attention matrix, the last row [-1, :] represents the focus of the final answer token.
+        focus_attn = avg_attn[-1, :]
 
-        # 6. Isolate visual tokens
+        # 5. Geometric Extraction
         image_attn_1d = focus_attn[image_token_start:image_token_end]
 
-        # 7. Normalize
         if image_attn_1d.max() > 0:
             image_attn_1d = image_attn_1d / image_attn_1d.max()
             
-        # 8. DYNAMIC GRID (Crash-Proof Reshaping)
         num_tokens = image_attn_1d.shape[0]
         grid_h = int(math.sqrt(num_tokens))
         grid_w = num_tokens // grid_h 
         
-        if grid_h * grid_w != num_tokens:
-            target_size = grid_h * grid_w
-            image_attn_1d = image_attn_1d[:target_size]
-
-        image_attn_2d = image_attn_1d.view(1, 1, grid_h, grid_w)
-        return image_attn_2d
+        image_attn_2d = image_attn_1d[:grid_h*grid_w].view(1, 1, grid_h, grid_w)
+        return image_attn_2d    
 
     def process_bimodal_tuples(self, candidates_data, outputs, image_token_start, image_token_end):
         bimodal_tuples = []
