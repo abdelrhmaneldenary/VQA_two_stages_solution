@@ -178,7 +178,7 @@ def main():
             
             # 2. Bridge (UPDATED DYNAMIC ARGUMENTS)
             bimodal_tuples = bridge.process_bimodal_tuples(
-                candidates_list=candidates, 
+                candidates_data=candidates, 
                 outputs=qwen_outputs, 
                 image_token_start=start_idx, 
                 image_token_end=end_idx
