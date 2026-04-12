@@ -98,7 +98,29 @@ class LatentBridge:
                 align_corners=False
             ).squeeze() 
             
-            dense_logit_prior = self._probability_to_logits(attn_grid_256)
+            # ==========================================
+            # 🌉 SPATIAL CALIBRATION & SHARPENING
+            # ==========================================
+            import torch # Ensure torch is available in this scope
+            
+            min_val = attn_grid_256.min()
+            max_val = attn_grid_256.max()
+            
+            # 1. Min-Max Normalize to [0.0, 1.0] to stretch the contrast
+            if max_val > min_val:
+                normalized_attn = (attn_grid_256 - min_val) / (max_val - min_val)
+            else:
+                normalized_attn = attn_grid_256
+                
+            # 2. Quadratic Sharpening (Kills background static, spikes the target noun)
+            sharpened_attn = normalized_attn ** 2
+            
+            # 3. Safe Log-Odds Conversion
+            # We clamp to prevent math domain errors (infinity/-infinity)
+            clamped_attn = torch.clamp(sharpened_attn, min=1e-4, max=0.9999)
+            dense_logit_prior = torch.log(clamped_attn / (1.0 - clamped_attn))
+            # ==========================================
+            
             bimodal_tuples.append((str(candidate_text), dense_logit_prior))
             
         return bimodal_tuples

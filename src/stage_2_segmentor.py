@@ -38,8 +38,7 @@ class Stage2Segmentor:
             for candidate_text, dense_logit_prior in bimodal_tuples:
                 # 1. Boost the Signal
                 # A logit of 3.85 is a bit soft for SAM (it expects -20 to +20).
-                # We multiply by 5 to turn the 98% probability into a booming command.
-                amplified_prior = dense_logit_prior * 5.0
+                amplified_prior = dense_logit_prior 
                 dense_prompt_tensor = amplified_prior.to(torch.float32) 
                 
                 inputs = self.processor(
