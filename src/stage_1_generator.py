@@ -30,33 +30,35 @@ class Stage1Generator:
         self.model.eval()
 
         # ==========================================
-        # 🧠 THE HYBRID ATTENTION SURGERY (ROBUST)
+        # 🧠 THE HYBRID ATTENTION SURGERY (FIXED)
         # ==========================================
-        # 1. Dynamically hunt for the very last self_attn layer
         target_layer_module = None
         target_layer_name = ""
         
         for name, module in self.model.named_modules():
-            if "self_attn" in name:
+            # --- THE FIX ---
+            # Use .endswith() to perfectly target the attention block 
+            # and ignore its sub-layers like self_attn.q_proj or self_attn.o_proj
+            if name.endswith(".self_attn"):
                 target_layer_module = module
                 target_layer_name = name
                 
         if target_layer_module is None:
             raise AttributeError("❌ Could not dynamically find a 'self_attn' layer!")
             
-        print(f"✅ Found target layer for surgery: {target_layer_name}")
+        print(f"✅ Found exact target layer for surgery: {target_layer_name}")
 
-        # 2. Morph ONLY this specific layer back to "Eager" mode
+        # Morph ONLY this specific layer back to "Eager" mode
         target_layer_module.__class__ = Qwen2VLAttention
 
-        # 3. Pre-Hook: Sneak the 'output_attentions=True' flag into this layer ONLY.
+        # Pre-Hook
         def pre_hook_fn(module, args, kwargs):
             kwargs['output_attentions'] = True
             return args, kwargs
             
         target_layer_module.register_forward_pre_hook(pre_hook_fn, with_kwargs=True)
 
-        # 4. Post-Hook: Catch the materialized matrix safely on the CPU
+        # Post-Hook
         self.captured_attentions = []
         def post_hook_fn(module, input, output):
             if isinstance(output, tuple) and len(output) > 1 and output[1] is not None:
