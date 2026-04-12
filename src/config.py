@@ -16,7 +16,7 @@ CONFIG = {
     # Stage 1 Parameters
     "prompt_strategy": "3-Shot_In_Context",
     "num_beams": 2,
-    "lambda_penalty": 4,
+    "lambda_penalty": 4.0,
     
     # Latent Bridge Parameters
     "logit_scale": 1.0,
