@@ -4,6 +4,9 @@ from transformers import AutoProcessor, Qwen2VLForConditionalGeneration, BitsAnd
 from qwen_vl_utils import process_vision_info
 import ast
 
+# Required for the Hybrid Attention Surgery
+from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLAttention 
+
 class Stage1Generator:
     def __init__(self, model_id="Qwen/Qwen2-VL-2B-Instruct"):
         print(f"🚀 Loading Stage 1 Semantic Engine: {model_id}")
@@ -17,61 +20,73 @@ class Stage1Generator:
 
         self.processor = AutoProcessor.from_pretrained(model_id)
         
-        # --- THE FIX: SET ATTN_IMPLEMENTATION TO 'EAGER' ---
+        # 1. LOAD WITH SDPA (Massive Speed & VRAM Savings)
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
             model_id,
             quantization_config=bnb_config,
-            device_map="cuda:1",  # <--- Moved entirely to GPU 1
-            attn_implementation="eager" # Required to allow output_attentions
+            device_map="auto",
+            attn_implementation="sdpa" 
         )
-        # ----------------------------------------------------
-        
         self.model.eval()
-        
-        # Now this line will work without crashing
-        self.model.config.output_attentions = True
 
+        # ==========================================
+        # 🧠 THE HYBRID ATTENTION SURGERY 
+        # ==========================================
+        # 1. Find the very last attention layer
+        last_layer_attn = self.model.model.layers[-1].self_attn
+
+        # 2. Morph ONLY this specific layer back to "Eager" mode
+        last_layer_attn.__class__ = Qwen2VLAttention
+
+        # 3. Pre-Hook: Sneak the 'output_attentions=True' flag into this layer ONLY.
+        def pre_hook_fn(module, args, kwargs):
+            kwargs['output_attentions'] = True
+            return args, kwargs
+            
+        last_layer_attn.register_forward_pre_hook(pre_hook_fn, with_kwargs=True)
+
+        # 4. Post-Hook: Catch the materialized matrix safely on the CPU
         self.captured_attentions = []
+        def post_hook_fn(module, input, output):
+            if isinstance(output, tuple) and len(output) > 1 and output[1] is not None:
+                self.captured_attentions.append(output[1].detach().cpu())
 
-        def hook_fn(module, input, output):
-            # In 'eager' mode, output[1] will now contain the attention weights
-            if isinstance(output, tuple) and len(output) > 1:
-                if output[1] is not None:
-                    self.captured_attentions.append(output[1].detach().cpu())
-
-        target_layer = None
-        for name, module in self.model.named_modules():
-            if "self_attn" in name:
-                target_layer = module
-        
-        if target_layer:
-            print(f"✅ Tapping: {target_layer.__class__.__name__}")
-            self.hook = target_layer.register_forward_hook(hook_fn)
-
+        self.hook = last_layer_attn.register_forward_hook(post_hook_fn)
+        print("✅ Hybrid Attention Active: 99% SDPA Speed, 1% Eager Extraction")
+        # ==========================================
 
     def generate_candidates(self, image_path, question, context_string, num_beams=4, diversity_penalty=0.5):
+        # Clear buffer
         self.captured_attentions = []
 
-        # 1. Standard Prompting
-        prompt_text = (f"{context_string}Target Image Analysis:\nQuestion: '{question}'\nPlausible Visual Answers:")
+        # 1. Prompt Construction
+        # 1. Prompt Construction (AGGRESSIVE ALIGNMENT)
+        prompt_text = (
+            f"{context_string}"
+            f"You are a precise bounding-box and segmentation detector. "
+            f"Look at the image and answer the following question using ONLY specific, concrete, physical nouns. "
+            f"STRICT RULE: NEVER use generic words like 'object', 'target', 'item', or 'picture'.\n"
+            f"Question: '{question}'\n"
+            f"Concrete Physical Answer:"
+        )        
         messages = [{"role": "user", "content": [
-            {"type": "image", "image": image_path, "max_pixels": 156800},
+            {"type": "image", "image": image_path, "max_pixels": 313600},
             {"type": "text", "text": prompt_text}
         ]}]
 
-        # 2. Processor
+        # 2. Processing
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         image_inputs, video_inputs = process_vision_info(messages)
         inputs = self.processor(text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt").to(self.model.device)
 
-        # 3. Dynamic Token Locator
+        # 3. Dynamic Token Locator for the Bridge
         input_ids = inputs["input_ids"][0].cpu()
         image_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
         image_indices = (input_ids == image_token_id).nonzero(as_tuple=True)[0]
         start_idx = image_indices[0].item()
         end_idx = image_indices[-1].item() + 1
 
-        # 4. DBS Execution with Explicit Attention Flag
+        # 4. DBS Execution (CRITICAL: output_attentions=True is REMOVED from here)
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
@@ -83,23 +98,16 @@ class Stage1Generator:
                 diversity_penalty=diversity_penalty, 
                 num_return_sequences=num_beams,
                 return_dict_in_generate=True,      
-                output_attentions=True, # We keep this here too
                 do_sample=False,
                 use_cache=False 
             )
 
-        # 5. The Hook Check
+        # 5. Extract Hooked Attention
         if not self.captured_attentions:
-            # Last ditch effort: Try to find any attention-like tensor in the output object
-            if hasattr(outputs, 'attentions') and outputs.attentions:
-                # If the script actually returned them in the standard way, use those
-                final_bridge_attentions = outputs.attentions
-            else:
-                raise ValueError("❌ Hook AND Native Attention both failed. Custom script is blocking attention flow.")
-        else:
-            final_bridge_attentions = [ (self.captured_attentions[-1],) ]
+            raise ValueError("❌ Hook failed to capture attention. Check Hybrid Surgery setup.")
+        final_bridge_attentions = [ (self.captured_attentions[-1],) ]
 
-        # 6. Parse sequences
+        # 6. Parse Sequences
         candidates_data = [] 
         for seq_idx in range(num_beams):
             generated_ids = outputs.sequences[seq_idx][len(inputs["input_ids"][0]):]
@@ -111,6 +119,8 @@ class Stage1Generator:
                 else: candidates_data.append((decoded_text, seq_idx))
             except: candidates_data.append((decoded_text, seq_idx))
 
+        # Memory Cleanup
         del inputs
         torch.cuda.empty_cache()
+        
         return candidates_data, final_bridge_attentions, start_idx, end_idx
