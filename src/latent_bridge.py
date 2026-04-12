@@ -58,69 +58,65 @@ class LatentBridge:
         return image_attn_2d    
 
     def process_bimodal_tuples(self, candidates_data, outputs, image_token_start, image_token_end):
-        bimodal_tuples = []
-        
-        # --- ROBUST HANDSHAKE ---
-        # If Stage 1 passed us the raw hook data (a tuple/list), use it directly.
-        # Otherwise, try to extract the .attentions attribute from a HF object.
-        if isinstance(outputs, (list, tuple)):
-            attentions_to_process = outputs
-        elif hasattr(outputs, 'attentions'):
-            attentions_to_process = outputs.attentions
-        else:
-            raise ValueError(f"❌ Latent Bridge received unrecognized output type: {type(outputs)}")
-        # ------------------------
-        
-        for item in candidates_data:
-            if isinstance(item, tuple) and len(item) == 2:
-                candidate_text, seq_idx = item
+            bimodal_tuples = []
+            
+            # --- ROBUST HANDSHAKE ---
+            if isinstance(outputs, (list, tuple)):
+                attentions_to_process = outputs
+            elif hasattr(outputs, 'attentions'):
+                attentions_to_process = outputs.attentions
             else:
-                candidate_text = item
-                seq_idx = 0 
+                raise ValueError(f"❌ Latent Bridge received unrecognized output type: {type(outputs)}")
+            # ------------------------
+            
+            for item in candidates_data:
+                if isinstance(item, tuple) and len(item) == 2:
+                    candidate_text, seq_idx = item
+                else:
+                    candidate_text = item
+                    seq_idx = 0 
+                    
+                doc = self.nlp(str(candidate_text))
+                semantic_tokens = [token.text for token in doc if token.pos_ in self.valid_pos]
+                if not semantic_tokens:
+                    semantic_tokens = [str(candidate_text)]
+                    
+                # Use the verified attentions_to_process
+                attn_grid_2d = self._extract_and_reshape_attention(
+                    attentions_to_process, 
+                    image_token_start, 
+                    image_token_end,
+                    seq_idx=seq_idx
+                )
                 
-            doc = self.nlp(str(candidate_text))
-            semantic_tokens = [token.text for token in doc if token.pos_ in self.valid_pos]
-            if not semantic_tokens:
-                semantic_tokens = [str(candidate_text)]
+                attn_grid_256 = F.interpolate(
+                    attn_grid_2d.to(torch.float32), 
+                    size=self.sam3_prompt_size, 
+                    mode='bilinear', 
+                    align_corners=False
+                ).squeeze() 
                 
-            # Use the verified attentions_to_process
-            attn_grid_2d = self._extract_and_reshape_attention(
-                attentions_to_process, 
-                image_token_start, 
-                image_token_end,
-                seq_idx=seq_idx
-            )
-            
-            attn_grid_256 = F.interpolate(
-                attn_grid_2d.to(torch.float32), 
-                size=self.sam3_prompt_size, 
-                mode='bilinear', 
-                align_corners=False
-            ).squeeze() 
-            
-            # ==========================================
-            # 🌉 SPATIAL CALIBRATION & SHARPENING
-            # ==========================================
-            import torch # Ensure torch is available in this scope
-            
-            min_val = attn_grid_256.min()
-            max_val = attn_grid_256.max()
-            
-            # 1. Min-Max Normalize to [0.0, 1.0] to stretch the contrast
-            if max_val > min_val:
-                normalized_attn = (attn_grid_256 - min_val) / (max_val - min_val)
-            else:
-                normalized_attn = attn_grid_256
+                # ==========================================
+                # 🌉 SPATIAL CALIBRATION & SHARPENING
+                # ==========================================
+                min_val = attn_grid_256.min()
+                max_val = attn_grid_256.max()
                 
-            # 2. Quadratic Sharpening (Kills background static, spikes the target noun)
-            sharpened_attn = normalized_attn ** 2
-            
-            # 3. Safe Log-Odds Conversion
-            # We clamp to prevent math domain errors (infinity/-infinity)
-            clamped_attn = torch.clamp(sharpened_attn, min=1e-4, max=0.9999)
-            dense_logit_prior = torch.log(clamped_attn / (1.0 - clamped_attn))
-            # ==========================================
-            
-            bimodal_tuples.append((str(candidate_text), dense_logit_prior))
-            
-        return bimodal_tuples
+                # 1. Min-Max Normalize to [0.0, 1.0] to stretch the contrast
+                if max_val > min_val:
+                    normalized_attn = (attn_grid_256 - min_val) / (max_val - min_val)
+                else:
+                    normalized_attn = attn_grid_256
+                    
+                # 2. Quadratic Sharpening (Kills background static, spikes the target noun)
+                sharpened_attn = normalized_attn ** 2
+                
+                # 3. Safe Log-Odds Conversion
+                # We clamp to prevent math domain errors (infinity/-infinity)
+                clamped_attn = torch.clamp(sharpened_attn, min=1e-4, max=0.9999)
+                dense_logit_prior = torch.log(clamped_attn / (1.0 - clamped_attn))
+                # ==========================================
+                
+                bimodal_tuples.append((str(candidate_text), dense_logit_prior))
+                
+            return bimodal_tuples
