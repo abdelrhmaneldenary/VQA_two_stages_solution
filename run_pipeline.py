@@ -1,4 +1,5 @@
 import os
+import sys
 import gc
 import csv
 import time
@@ -9,12 +10,14 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 from sklearn.metrics import f1_score, precision_score, recall_score, precision_recall_curve, auc
 
+sys.path.append(os.getcwd()) # Kaggle module fix
 # Import our custom modular architecture
 from src.data_loader import VQADatasetLoader
 from src.stage_1_generator import Stage1Generator
 from src.latent_bridge import LatentBridge
 from src.stage_2_segmentor import Stage2Segmentor
 from src.stage_3_topology import TopologicalEvaluator
+from src.config import CONFIG
 
 # ==========================================
 # Artifact & Visualization Helpers
@@ -142,18 +145,6 @@ def log_experiment(run_id, notes, config, metrics, pr_auc, log_file="experiment_
 # The Main Orchestrator
 # ==========================================
 def main():
-    CONFIG = {
-        "run_id": "EXP_002",
-        "notes": "Full Artifact Generation Run",
-        "prompt_strategy": "3-Shot_In_Context",
-        "num_beams": 4,
-        "lambda_penalty": 0.5,
-        "logit_scale": 1.0,
-        "w1_ciou": 0.4,
-        "w2_conflict": 0.6,
-        "threshold": 0.5, 
-        "dataset_dir": "/kaggle/input/datasets/abdelrhmanshaheen/answer-therapy"
-    }
 
     print(f"🚀 Initializing Run: {CONFIG['run_id']}")
     artifact_dir = create_artifact_dirs(CONFIG["run_id"])
