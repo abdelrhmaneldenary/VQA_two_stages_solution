@@ -3,24 +3,26 @@ import numpy as np
 import os
 from PIL import Image
 from transformers import Sam3Processor, Sam3Model
-from huggingface_hub import HfFolder
+import huggingface_hub # Corrected import
 
 class Stage2Segmentor:
     def __init__(self, model_id="facebook/sam3"):
         print(f"🚀 Initializing Stage 2 (SAM 3)...")
         
-        # CRITICAL FIX: Get the token from the session memory
-        token = HfFolder.get_token()
+        # 1. Get token using the modern huggingface_hub API
+        token = huggingface_hub.get_token()
+        
         if not token:
-            print("⚠️ Warning: No HF token found. Ensure you ran login(token=...)")
+            print("⚠️ No HF token found in session! Trying environment variable...")
+            token = os.getenv("HF_TOKEN")
 
-        # FIX FOR OSERROR: Force 'local_files_only=False' and pass token explicitly
-        # We also use Sam3Processor directly instead of AutoProcessor
+        # 2. Loading with explicit authentication
         try:
+            # We use Sam3Processor/Model specifically to unlock PCS features
             self.processor = Sam3Processor.from_pretrained(
                 model_id, 
                 token=token,
-                local_files_only=False 
+                trust_remote_code=True
             )
             
             self.model = Sam3Model.from_pretrained(
@@ -28,11 +30,11 @@ class Stage2Segmentor:
                 torch_dtype=torch.bfloat16,
                 device_map="auto",
                 token=token,
-                local_files_only=False
+                trust_remote_code=True
             )
         except Exception as e:
-            print(f"❌ Error loading SAM 3: {e}")
-            print("💡 Tip: Ensure there is NO folder named 'sam3' or 'facebook' in your current directory.")
+            print(f"❌ Critical Error loading SAM 3: {e}")
+            print("💡 PRO-TIP: Run !pip install -U huggingface_hub transformers before running this.")
             raise e
 
         self.model.eval()
@@ -43,9 +45,10 @@ class Stage2Segmentor:
         mask_scores = []
         
         for candidate_text, dense_logit_prior in bimodal_tuples:
-            # SAM 3 expects (Batch, Channels, H, W) -> (1, 1, 256, 256)
+            # Prepare SAM 3 inputs: (Batch, Channels, H, W)
             dense_prompt_tensor = dense_logit_prior.unsqueeze(0).unsqueeze(0)
             
+            # Pass BOTH Qwen's text answer and the Bridge's geometric prior
             inputs = self.processor(
                 images=raw_image,
                 text=candidate_text,
@@ -56,7 +59,7 @@ class Stage2Segmentor:
             with torch.no_grad():
                 outputs = self.model(**inputs)
 
-            # Use SAM 3's specific post-processing
+            # SAM 3 native post-processing
             results = self.processor.post_process_instance_segmentation(
                 outputs,
                 threshold=0.5,
