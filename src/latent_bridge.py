@@ -2,14 +2,11 @@ import torch
 import torch.nn.functional as F
 import spacy
 import numpy as np
+import math
 
 class LatentBridge:
     def __init__(self, logit_scale_factor=1.0, sam3_prompt_size=(256, 256)):
-        """
-        Initializes the Latent Bridge. Loads a lightweight NLP model purely 
-        for Part-of-Speech (POS) tagging to filter out stop-words.
-        """
-        print("Initializing Latent Bridge & SpaCy POS Tagger...")
+        print("🚀 Initializing Latent Bridge & SpaCy POS Tagger...")
         try:
             self.nlp = spacy.load("en_core_web_sm")
         except OSError:
@@ -17,85 +14,78 @@ class LatentBridge:
             
         self.logit_scale_factor = logit_scale_factor
         self.sam3_prompt_size = sam3_prompt_size
-        
-        # Valid semantic targets. We ignore determiners ("the", "a") and prepositions ("on")
         self.valid_pos = {"NOUN", "PROPN", "ADJ", "VERB"}
 
     def _probability_to_logits(self, prob_matrix, epsilon=1e-5):
-        """
-        Translates raw attention probabilities into SAM 3 Logit Space.
-        Formula: Logit = ln(p / (1 - p))
-        """
-        # Clip probabilities to prevent log(0) or division by zero (infinity)
+        # Move to float32 for stable log math if it isn't already
+        prob_matrix = prob_matrix.to(torch.float32)
         prob_matrix = torch.clamp(prob_matrix, min=epsilon, max=1.0 - epsilon)
-        
-        # Log-odds conversion
         logits = torch.log(prob_matrix / (1.0 - prob_matrix))
-        
         return logits * self.logit_scale_factor
 
-    def _extract_and_reshape_attention(self, raw_attentions, image_token_start, image_token_end, grid_size):
+    def _extract_and_reshape_attention(self, all_steps_attentions, image_token_start, image_token_end):
         """
-        Extracts the attention weights for the image tokens, averages them across 
-        transformer heads, and reshapes the 1D array back into a 2D spatial grid.
+        Aggregates attention across ALL generation steps, safely reshapes it into a 2D grid.
         """
-        # Attentions format during generation: (batch_size, num_heads, 1, sequence_length)
-        # We average across all attention heads in the final transformer layer
-        final_layer_attn = raw_attentions[-1] 
-        avg_head_attn = torch.mean(final_layer_attn, dim=1).squeeze(0).squeeze(0)
+        # 1. Stack all generation steps: Tuple of length (Num_Steps) -> Tensor (Num_Steps, Layers, Heads, 1, Seq_Len)
+        # We only care about the LAST layer [-1] for semantic routing.
+        # Shape becomes: (Num_Steps, Batch=1, Num_Heads, 1, Seq_Len)
+        last_layer_all_steps = torch.stack([step_attn[-1] for step_attn in all_steps_attentions])
         
-        # Isolate ONLY the tokens corresponding to the visual image patches
-        image_attn_1d = avg_head_attn[image_token_start:image_token_end]
+        # 2. Average across steps (Time) AND heads (Features)
+        # Shape becomes: (1, Seq_Len) -> squeeze to (Seq_Len)
+        avg_attn = last_layer_all_steps.mean(dim=0).mean(dim=1).squeeze()
         
-        # Normalize so the maximum attention spike equals 1.0 (Probability peak)
+        # 3. Isolate visual tokens
+        image_attn_1d = avg_attn[image_token_start:image_token_end]
+        
+        # 4. Normalize
         if image_attn_1d.max() > 0:
             image_attn_1d = image_attn_1d / image_attn_1d.max()
             
-        # Reshape from a flat 1D sequence back into the 2D visual grid (e.g., 16x16)
-        image_attn_2d = image_attn_1d.view(1, 1, grid_size[0], grid_size[1])
+        # 5. DYNAMIC GRID CALCULATION (Prevents .view() crashes)
+        # Assuming Qwen creates a square-ish grid of tokens
+        num_tokens = image_attn_1d.shape[0]
+        grid_h = int(math.sqrt(num_tokens))
+        grid_w = num_tokens // grid_h 
+        
+        # Safety fallback if it's not perfectly rectangular
+        if grid_h * grid_w != num_tokens:
+            print(f"⚠️ Warning: Visual tokens ({num_tokens}) do not form a perfect grid. Pad/Truncate needed.")
+            # Simple truncation to make it fit a square for the bridge
+            target_size = grid_h * grid_w
+            image_attn_1d = image_attn_1d[:target_size]
+
+        image_attn_2d = image_attn_1d.view(1, 1, grid_h, grid_w)
         return image_attn_2d
 
-    def process_bimodal_tuples(self, candidates_list, outputs, image_token_start, image_token_end, visual_grid_size):
-        """
-        The main bridge function. Takes text candidates and neural outputs, 
-        and returns a list of (text, SAM3_Dense_Logit_Mask) tuples.
-        """
+    def process_bimodal_tuples(self, candidates_list, outputs, image_token_start, image_token_end):
         bimodal_tuples = []
         
         for candidate in candidates_list:
-            # 1. POS Masking: Identify which words actually matter
             doc = self.nlp(candidate)
             semantic_tokens = [token.text for token in doc if token.pos_ in self.valid_pos]
-            
-            # If the NLP filter wiped out everything (e.g., candidate was just "it"), fallback to the whole string
             if not semantic_tokens:
                 semantic_tokens = [candidate]
                 
-            # 2. Extract raw attention for this specific candidate
-            # (Note: In a full implementation, you map the semantic_tokens to their exact generation step index. 
-            # For brevity in this core logic, we assume 'candidate_attention_tuple' holds those specific steps).
-            candidate_attention_tuple = outputs.attentions[-1] # Simplification: tracking the final token's focus
-            
-            # 3. Reshape the 1D visual tokens back into a 2D abstract grid
+            # Use ALL attention steps, not just [-1]
             attn_grid_2d = self._extract_and_reshape_attention(
-                candidate_attention_tuple, 
+                outputs.attentions, 
                 image_token_start, 
-                image_token_end, 
-                visual_grid_size
+                image_token_end
             )
             
-            # 4. Interpolate from Qwen's low-res grid (e.g. 16x16) to SAM 3's high-res prompt space (256x256)
+            # Interpolate to 256x256 (Ensure it's float32 for interpolate)
             attn_grid_256 = F.interpolate(
-                attn_grid_2d, 
+                attn_grid_2d.to(torch.float32), 
                 size=self.sam3_prompt_size, 
                 mode='bilinear', 
                 align_corners=False
-            ).squeeze() # Remove batch/channel dims -> Shape: (256, 256)
+            ).squeeze() 
             
-            # 5. The Hallucination Filter: Convert Probability (0 to 1) to Logits (-X to +X)
+            # Convert to Logits
             dense_logit_prior = self._probability_to_logits(attn_grid_256)
             
-            # Append the completed bimodal tuple ready for Stage 2
             bimodal_tuples.append((candidate, dense_logit_prior))
             
         return bimodal_tuples

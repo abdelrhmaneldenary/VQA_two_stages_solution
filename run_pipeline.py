@@ -167,16 +167,28 @@ def main():
         print(f"Processing Image {idx+1}/{len(test_subset)}: {item['question']}")
         
         try:
-            # 1. Semantics
-            candidates, qwen_outputs = stage1.generate_candidates(
-                item["resolved_image_path"], item["question"], few_shot_context, 
-                CONFIG["num_beams"], CONFIG["lambda_penalty"]
+            # 1. Semantics (UPDATED RETURN SIGNATURE)
+            candidates, qwen_outputs, start_idx, end_idx = stage1.generate_candidates(
+                item["resolved_image_path"], 
+                item["question"], 
+                few_shot_context, 
+                num_beams=CONFIG["num_beams"], 
+                diversity_penalty=CONFIG["lambda_penalty"]
             )
             
-            # 2. Bridge
+            # 2. Bridge (UPDATED DYNAMIC ARGUMENTS)
             bimodal_tuples = bridge.process_bimodal_tuples(
-                candidates, qwen_outputs, image_token_start=255, image_token_end=511, visual_grid_size=(16, 16)
+                candidates_list=candidates, 
+                outputs=qwen_outputs, 
+                image_token_start=start_idx, 
+                image_token_end=end_idx
             )
+
+            # 🧹 CRITICAL VRAM CLEANUP: Delete the massive attention tensors
+            # before SAM 3 tries to load its image latents into the GPU
+            del qwen_outputs
+            torch.cuda.empty_cache()
+            gc.collect()
 
             # 3. Geometry
             final_masks, _ = stage2.generate_masks(item["resolved_image_path"], bimodal_tuples)
@@ -202,6 +214,7 @@ def main():
         except Exception as e:
             print(f"  -> ❌ Pipeline failed: {str(e)}")
         
+        # End of loop safety cleanup
         torch.cuda.empty_cache()
         gc.collect()
 

@@ -9,7 +9,7 @@ class Stage1Generator:
         Initializes the VLM. We use 4-bit quantization by default to ensure 
         this can run on Kaggle/Colab GPUs without OOM (Out Of Memory) errors.
         """
-        print(f"Loading Stage 1 Semantic Engine: {model_id}")
+        print(f"🚀 Loading Stage 1 Semantic Engine: {model_id}")
         
         # 4-bit Quantization is mandatory for local/Kaggle compute
         bnb_config = BitsAndBytesConfig(
@@ -19,6 +19,7 @@ class Stage1Generator:
             bnb_4bit_compute_dtype=torch.bfloat16
         )
 
+        # local_files_only=True if you are fully offline, otherwise keep default
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
             model_id,
@@ -30,13 +31,13 @@ class Stage1Generator:
     def generate_candidates(self, image_path, question, context_string, num_beams=4, diversity_penalty=0.5):
         """
         Executes Diverse Beam Search to find ambiguous interpretations.
-        Returns the parsed candidate list AND the raw generation object containing attention tensors.
+        Returns the parsed candidate list, raw attention tensors, and the exact token boundaries of the image.
         """
         # 1. Construct the final prompt using the Few-Shot context
         prompt_text = (
             f"{context_string}"
-            f"Target Image Analysis:\\n"
-            f"Question: '{question}'\\n"
+            f"Target Image Analysis:\n"
+            f"Question: '{question}'\n"
             f"Plausible Visual Answers:"
         )
 
@@ -59,11 +60,31 @@ class Stage1Generator:
             text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt"
         ).to(self.model.device)
 
+        # ---------------------------------------------------------
+        # NEW: FIND THE IMAGE TOKENS DYNAMICALLY
+        # Qwen2-VL uses <|image_pad|> tokens for the visual patches.
+        # We need to find exactly where they sit in the 1D sequence.
+        # ---------------------------------------------------------
+        input_ids = inputs["input_ids"][0].cpu()
+        image_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
+        
+        # Get all indices where the token is an image patch
+        image_indices = (input_ids == image_token_id).nonzero(as_tuple=True)[0]
+        
+        if len(image_indices) == 0:
+            raise ValueError("❌ Could not locate <|image_pad|> tokens in the sequence!")
+            
+        start_idx = image_indices[0].item()
+        end_idx = image_indices[-1].item() + 1 # +1 for Python slicing
+        # ---------------------------------------------------------
+
         # 3. Execute Diverse Beam Search (DBS) with Tensor Extraction Hooks
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=30,
+                custom_generate="transformers-community/group-beam-search", # Required for v5.x
+                trust_remote_code=True,
                 num_beams=num_beams,
                 num_beam_groups=num_beams,         # Required to activate DBS in HuggingFace
                 diversity_penalty=diversity_penalty, # The Lambda parameter from our CSV
@@ -90,4 +111,5 @@ class Stage1Generator:
         del inputs
         torch.cuda.empty_cache()
 
-        return candidates_list, outputs
+        # RETURN THE FULL PAYLOAD for the Latent Bridge
+        return candidates_list, outputs, start_idx, end_idx
