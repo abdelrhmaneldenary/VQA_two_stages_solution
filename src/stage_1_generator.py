@@ -4,9 +4,6 @@ from transformers import AutoProcessor, Qwen2VLForConditionalGeneration, BitsAnd
 from qwen_vl_utils import process_vision_info
 import ast
 
-# Required for the Hybrid Attention Surgery
-from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLAttention 
-
 class Stage1Generator:
     def __init__(self, model_id="Qwen/Qwen2-VL-2B-Instruct"):
         print(f"🚀 Loading Stage 1 Semantic Engine: {model_id}")
@@ -30,15 +27,12 @@ class Stage1Generator:
         self.model.eval()
 
         # ==========================================
-        # 🧠 THE HYBRID ATTENTION SURGERY (FIXED)
+        # 🧠 THE HYBRID ATTENTION SURGERY (MONKEY-PATCH)
         # ==========================================
         target_layer_module = None
         target_layer_name = ""
         
         for name, module in self.model.named_modules():
-            # --- THE FIX ---
-            # Use .endswith() to perfectly target the attention block 
-            # and ignore its sub-layers like self_attn.q_proj or self_attn.o_proj
             if name.endswith(".self_attn"):
                 target_layer_module = module
                 target_layer_name = name
@@ -48,25 +42,38 @@ class Stage1Generator:
             
         print(f"✅ Found exact target layer for surgery: {target_layer_name}")
 
-        # Morph ONLY this specific layer back to "Eager" mode
-        target_layer_module.__class__ = Qwen2VLAttention
+        # 1. The Monkey-Patch
+        # We save the original mathematical forward pass
+        original_forward = target_layer_module.forward
 
-        # Pre-Hook
-        def pre_hook_fn(module, args, kwargs):
-            kwargs['output_attentions'] = True
-            return args, kwargs
-            
-        target_layer_module.register_forward_pre_hook(pre_hook_fn, with_kwargs=True)
+        def patched_forward(*args, **kwargs):
+            new_args = list(args)
+            # The signature is: forward(hidden_states, attention_mask, position_ids, past_key_value, output_attentions, ...)
+            # If it's passed as the 5th positional argument (index 4), overwrite it.
+            if len(new_args) > 4:
+                new_args[4] = True
+                # Remove from kwargs to prevent Python "multiple values" crash
+                kwargs.pop('output_attentions', None) 
+            else:
+                # If it wasn't passed positionally, force it via kwarg
+                kwargs['output_attentions'] = True
+                
+            return original_forward(*new_args, **kwargs)
 
-        # Post-Hook
+        # We violently overwrite the layer's forward pass with our patched version
+        target_layer_module.forward = patched_forward
+
+        # 2. Keep the Post-Hook to catch the matrix on its way out
         self.captured_attentions = []
         def post_hook_fn(module, input, output):
+            # output is (attn_output, attn_weights, past_key_value)
             if isinstance(output, tuple) and len(output) > 1 and output[1] is not None:
                 self.captured_attentions.append(output[1].detach().cpu())
 
         self.hook = target_layer_module.register_forward_hook(post_hook_fn)
-        print("✅ Hybrid Attention Active: 99% SDPA Speed, 1% Eager Extraction")
+        print("✅ Hybrid Attention Active: Monkey-Patch deployed successfully.")
         # ==========================================
+
 
 
     def generate_candidates(self, image_path, question, context_string, num_beams=4, diversity_penalty=0.5):
