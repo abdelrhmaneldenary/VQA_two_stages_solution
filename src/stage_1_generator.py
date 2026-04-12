@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 from transformers import AutoProcessor, Qwen2VLForConditionalGeneration, BitsAndBytesConfig
 from qwen_vl_utils import process_vision_info
 import ast
@@ -22,32 +23,53 @@ class Stage1Generator:
         )
         self.model.eval()
         
-        # --- THE ATTENTION INTERCEPTOR ---
+        # --- THE ROBUST ATTENTION INTERCEPTOR ---
         self.captured_attentions = []
+
         def hook_fn(module, input, output):
-            # output[1] is the attention weights in Qwen's self-attention layer
+            # In Qwen2-VL, the attention weights are typically the second element in the output tuple
             if isinstance(output, tuple) and len(output) > 1:
+                # Detach and move to CPU to save VRAM for SAM 3
                 self.captured_attentions.append(output[1].detach().cpu())
 
-        # We "tap" the self-attention of the VERY LAST transformer layer
-        self.hook = self.model.model.layers[-1].self_attn.register_forward_hook(hook_fn)
-        # ---------------------------------
+        # DYNAMIC LAYER FINDER: We search for the VERY LAST attention module
+        # This bypasses the naming issues (.layers vs .h vs .blocks)
+        target_layer = None
+        for name, module in self.model.named_modules():
+            if "self_attn" in name:
+                target_layer = module
+        
+        if target_layer is None:
+            raise AttributeError("❌ Could not find a 'self_attn' layer in this model architecture!")
+            
+        print(f"✅ Successfully tapped attention layer: {target_layer.__class__.__name__}")
+        self.hook = target_layer.register_forward_hook(hook_fn)
+        # ----------------------------------------
 
     def generate_candidates(self, image_path, question, context_string, num_beams=4, diversity_penalty=0.5):
-        # Clear previous captures
+        # Reset the capture buffer for a fresh forward pass
         self.captured_attentions = []
 
-        # ... [Keep your prompt, messages, and input processing EXACTLY the same] ...
+        # 1. Construct Prompt
+        prompt_text = (f"{context_string}Target Image Analysis:\nQuestion: '{question}'\nPlausible Visual Answers:")
+        messages = [{"role": "user", "content": [
+            {"type": "image", "image": image_path, "max_pixels": 313600},
+            {"type": "text", "text": prompt_text}
+        ]}]
+
+        # 2. Process via MRoPE-aware template
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         image_inputs, video_inputs = process_vision_info(messages)
         inputs = self.processor(text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt").to(self.model.device)
 
+        # 3. Dynamic Token Locator for the Bridge
         input_ids = inputs["input_ids"][0].cpu()
         image_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
         image_indices = (input_ids == image_token_id).nonzero(as_tuple=True)[0]
         start_idx = image_indices[0].item()
         end_idx = image_indices[-1].item() + 1
 
+        # 4. DBS Execution
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
@@ -59,20 +81,20 @@ class Stage1Generator:
                 diversity_penalty=diversity_penalty, 
                 num_return_sequences=num_beams,
                 return_dict_in_generate=True,      
-                output_attentions=True, # Leave this on just in case, but we use the hook
+                output_attentions=True,            
                 do_sample=False,
                 use_cache=False 
             )
 
-        # 4. Use the Captured Hook Tensors
-        # Since use_cache=False, the last step's attention contains the full history.
-        # We package it to look like the format the Latent Bridge expects.
-        if self.captured_attentions:
-            # We take the last capture and wrap it in a tuple to mimic HF format
-            final_bridge_attentions = [ (self.captured_attentions[-1],) ]
-        else:
-            final_bridge_attentions = None
+        # 5. Package the Hooked Attention
+        # Since use_cache=False, the last capture in the buffer contains the full SeqLen x SeqLen attention map
+        if not self.captured_attentions:
+            raise ValueError("❌ Hook failed to capture attention. Check if 'output_attentions=True' is ignored by the custom script.")
+            
+        # We wrap it to match the Bridge's expected tuple format
+        final_bridge_attentions = [ (self.captured_attentions[-1],) ]
 
+        # 6. Parse Sequences
         candidates_data = [] 
         for seq_idx in range(num_beams):
             generated_ids = outputs.sequences[seq_idx][len(inputs["input_ids"][0]):]
@@ -86,6 +108,4 @@ class Stage1Generator:
 
         del inputs
         torch.cuda.empty_cache()
-
-        # We return the HOOKED attentions instead of outputs.attentions
         return candidates_data, final_bridge_attentions, start_idx, end_idx
