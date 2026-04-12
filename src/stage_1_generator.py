@@ -28,12 +28,8 @@ class Stage1Generator:
         )
         self.model.eval() # Ensure we are in inference mode (no gradients)
 
-    def generate_candidates(self, image_path, question, context_string, num_beams=4, diversity_penalty=0.5):
-        """
-        Executes Diverse Beam Search to find ambiguous interpretations.
-        Returns the parsed candidate list, raw attention tensors, and the exact token boundaries of the image.
-        """
-        # 1. Construct the final prompt using the Few-Shot context
+def generate_candidates(self, image_path, question, context_string, num_beams=4, diversity_penalty=0.5):
+        # 1. Construct Prompt
         prompt_text = (
             f"{context_string}"
             f"Target Image Analysis:\n"
@@ -45,14 +41,13 @@ class Stage1Generator:
             {
                 "role": "user",
                 "content": [
-                    # We limit max_pixels to prevent VRAM explosion on 4K images
                     {"type": "image", "image": image_path, "max_pixels": 313600},
                     {"type": "text", "text": prompt_text}
                 ]
             }
         ]
 
-        # 2. Process inputs for Qwen2.5-VL
+        # 2. Process Inputs
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         image_inputs, video_inputs = process_vision_info(messages)
         
@@ -60,58 +55,50 @@ class Stage1Generator:
             text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt"
         ).to(self.model.device)
 
-        # ---------------------------------------------------------
-        # NEW: FIND THE IMAGE TOKENS DYNAMICALLY
-        # Qwen2-VL uses <|image_pad|> tokens for the visual patches.
-        # We need to find exactly where they sit in the 1D sequence.
-        # ---------------------------------------------------------
+        # Dynamic Token Locator
         input_ids = inputs["input_ids"][0].cpu()
         image_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
-        
-        # Get all indices where the token is an image patch
         image_indices = (input_ids == image_token_id).nonzero(as_tuple=True)[0]
-        
-        if len(image_indices) == 0:
-            raise ValueError("❌ Could not locate <|image_pad|> tokens in the sequence!")
-            
         start_idx = image_indices[0].item()
-        end_idx = image_indices[-1].item() + 1 # +1 for Python slicing
-        # ---------------------------------------------------------
+        end_idx = image_indices[-1].item() + 1
 
-        # 3. Execute Diverse Beam Search (DBS) with Tensor Extraction Hooks
+        # 3. DIVERSE BEAM SEARCH RESTORED!
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=30,
-                custom_generate="transformers-community/group-beam-search", # Required for v5.x
+                
+                # --- YOUR ARCHITECTURE ---
+                custom_generate="transformers-community/group-beam-search",
                 trust_remote_code=True,
                 num_beams=num_beams,
-                num_beam_groups=num_beams,         # Required to activate DBS in HuggingFace
-                diversity_penalty=diversity_penalty, # The Lambda parameter from our CSV
-                return_dict_in_generate=True,      # Forces output as a dictionary, not just a tensor
-                output_attentions=True ,            # CRITICAL: Exposes the hidden cross-attention maps!
-                do_sample=False,
-                use_cache=False
+                num_beam_groups=num_beams,         
+                diversity_penalty=diversity_penalty, 
+                return_dict_in_generate=True,      
+                output_attentions=True,            
+                
+                # Required for the community script to run mathematically
+                do_sample=False                    
             )
 
-        # 4. Parse the output text into a Python list
-        # We only take the top-ranked sequence (outputs.sequences[0]) because DBS 
-        # forces the diversity into a single sequence containing our bracketed list.
-        generated_ids = outputs.sequences[0][len(inputs["input_ids"][0]):]
-        decoded_text = self.processor.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
-        
-        try:
-            # Safely evaluate the string "['cup', 'shadow']" into an actual Python list
-            candidates_list = ast.literal_eval(decoded_text)
-            if not isinstance(candidates_list, list):
-                candidates_list = [decoded_text] # Fallback if model forgets brackets
-        except (ValueError, SyntaxError):
-            # Fallback if the model hallucinates non-list formatting
-            candidates_list = [decoded_text]
+        # 4. Parse ALL DBS Beams
+        candidates_data = [] 
 
-        # Clean up memory immediately to save space for SAM 3
+        for seq_idx in range(num_beams):
+            generated_ids = outputs.sequences[seq_idx][len(inputs["input_ids"][0]):]
+            decoded_text = self.processor.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+            
+            try:
+                parsed_list = ast.literal_eval(decoded_text)
+                if isinstance(parsed_list, list):
+                    for item in parsed_list:
+                        candidates_data.append((item, seq_idx)) # Map Text to Beam Index
+                else:
+                    candidates_data.append((decoded_text, seq_idx))
+            except:
+                candidates_data.append((decoded_text, seq_idx))
+
         del inputs
         torch.cuda.empty_cache()
 
-        # RETURN THE FULL PAYLOAD for the Latent Bridge
-        return candidates_list, outputs, start_idx, end_idx
+        return candidates_data, outputs, start_idx, end_idx
