@@ -1,45 +1,30 @@
 import torch
 import numpy as np
-import os
 from PIL import Image
 from transformers import Sam3Processor, Sam3Model
-import huggingface_hub
 
 class Stage2Segmentor:
-    def __init__(self, model_id="facebook/sam3"):
-        print(f"🚀 Initializing Stage 2 (SAM 3)...")
-        
-        # 1. Force retrieval of token
-        token = huggingface_hub.get_token()
-        if not token:
-            # If the session token is missing, check the environment variable
-            token = os.getenv("HF_TOKEN")
-        
-        if not token:
-            raise ValueError("❌ No Hugging Face token found! Run login(token='...') in a cell first.")
+    def __init__(self, model_id=None):
+        print(f"🚀 Initializing Stage 2 (SAM 3) from LOCAL PATH: {model_id}")
 
-        # 2. Defensive Loading
+        # 1. Loading from Local Disk (No Tokens Required!)
         try:
-            # We explicitly pass the token and set local_files_only=False
-            print(f"📡 Fetching configuration from Hugging Face Hub...")
             self.processor = Sam3Processor.from_pretrained(
                 model_id, 
-                token=token,
-                local_files_only=False,
-                trust_remote_code=True
+                local_files_only=True,   # 🔒 Forces STRICT OFFLINE mode
+                trust_remote_code=True   # Still needed for SAM 3 architecture
             )
             
-            print(f"🧠 Downloading/Loading SAM 3 Weights...")
             self.model = Sam3Model.from_pretrained(
                 model_id,
                 torch_dtype=torch.bfloat16,
                 device_map="auto",
-                token=token,
-                local_files_only=False,
+                local_files_only=True,   # 🔒 Forces STRICT OFFLINE mode
                 trust_remote_code=True
             )
         except Exception as e:
-            print(f"❌ Error Detail: {str(e)}")
+            print(f"❌ Local Load Failed: {e}")
+            print(f"💡 PRO-TIP: Run '!ls {model_id}' to ensure the path is exactly correct.")
             raise e
 
         self.model.eval()
@@ -50,9 +35,10 @@ class Stage2Segmentor:
         mask_scores = []
         
         for candidate_text, dense_logit_prior in bimodal_tuples:
-            # Shape: (Batch=1, Channels=1, H=256, W=256)
+            # Prepare SAM 3 inputs: (Batch, Channels, H, W)
             dense_prompt_tensor = dense_logit_prior.unsqueeze(0).unsqueeze(0)
             
+            # Pass BOTH Qwen's text answer and the Bridge's geometric prior
             inputs = self.processor(
                 images=raw_image,
                 text=candidate_text,
@@ -63,7 +49,7 @@ class Stage2Segmentor:
             with torch.no_grad():
                 outputs = self.model(**inputs)
 
-            # Post-process back to original image dimensions
+            # SAM 3 native post-processing
             results = self.processor.post_process_instance_segmentation(
                 outputs,
                 threshold=0.5,

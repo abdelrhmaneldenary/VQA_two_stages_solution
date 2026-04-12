@@ -23,8 +23,7 @@ CONFIG = {
 
     #models id
     "model_s1_path": "/kaggle/input/datasets/ruhul77/qwen2-vl-2b-instruct" if IS_KAGGLE else "Qwen/Qwen2-VL-2B-Instruct",
-    "model_s2_path": "facebook/sam3", # SAM 3 Hub ID (Requires HF Login)
-    
+    "model_s2_path": "/kaggle/input/datasets/abdelrhmaneldenary/sam3-official-weights-v3" if IS_KAGGLE else "facebook/sam3",    
     # Stage 3 Parameters
     "w1_ciou": 0.4,
     "w2_conflict": 0.6,
