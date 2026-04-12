@@ -90,7 +90,8 @@ class Stage1Generator:
                 diversity_penalty=diversity_penalty, # The Lambda parameter from our CSV
                 return_dict_in_generate=True,      # Forces output as a dictionary, not just a tensor
                 output_attentions=True ,            # CRITICAL: Exposes the hidden cross-attention maps!
-                do_sample=False
+                do_sample=False,
+                use_cache=False
             )
 
         # 4. Parse the output text into a Python list
