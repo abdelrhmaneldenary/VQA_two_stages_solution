@@ -9,7 +9,7 @@ import cv2
 import matplotlib.pyplot as plt
 from datetime import datetime
 from sklearn.metrics import f1_score, precision_score, recall_score, precision_recall_curve, auc
-
+import traceback
 sys.path.append(os.getcwd()) # Kaggle module fix
 # Import our custom modular architecture
 from src.data_loader import VQADatasetLoader
@@ -213,6 +213,10 @@ def main():
 
         except Exception as e:
             print(f"  -> ❌ Pipeline failed: {str(e)}")
+            print("\n--- 🛑 ENGINEERING STACK TRACE ---")
+            traceback.print_exc()
+            print("----------------------------------\n")
+            break  # Stop the loop immediately on the first error so we can read it
         
         # End of loop safety cleanup
         torch.cuda.empty_cache()
