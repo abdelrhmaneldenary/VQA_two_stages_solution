@@ -16,42 +16,38 @@ class Stage1Generator:
         )
 
         self.processor = AutoProcessor.from_pretrained(model_id)
+        
+        # --- THE FIX: SET ATTN_IMPLEMENTATION TO 'EAGER' ---
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
             model_id,
             quantization_config=bnb_config,
-            device_map="auto"
+            device_map="auto",
+            attn_implementation="eager" # Required to allow output_attentions
         )
+        # ----------------------------------------------------
+        
         self.model.eval()
         
-        # --- THE CONFIG OVERRIDE ---
-        # We force the model to always output attentions at the config level
-        # This overrides any mistakes the custom_generate script makes
+        # Now this line will work without crashing
         self.model.config.output_attentions = True
-        # ---------------------------
 
         self.captured_attentions = []
 
         def hook_fn(module, input, output):
-            # Qwen2-VL attention forward usually returns (attn_output, attn_weights, past_key_value)
-            # If output_attentions=True is working, output[1] is our target.
-            if isinstance(output, tuple):
-                if len(output) > 1 and output[1] is not None:
+            # In 'eager' mode, output[1] will now contain the attention weights
+            if isinstance(output, tuple) and len(output) > 1:
+                if output[1] is not None:
                     self.captured_attentions.append(output[1].detach().cpu())
-                else:
-                    # Debug log if we hit the hook but weights are missing
-                    pass 
 
-        # Find the last self-attention layer
         target_layer = None
         for name, module in self.model.named_modules():
             if "self_attn" in name:
                 target_layer = module
         
-        if target_layer is None:
-            raise AttributeError("❌ Could not find a 'self_attn' layer!")
-            
-        print(f"✅ Tapping: {target_layer.__class__.__name__}")
-        self.hook = target_layer.register_forward_hook(hook_fn)
+        if target_layer:
+            print(f"✅ Tapping: {target_layer.__class__.__name__}")
+            self.hook = target_layer.register_forward_hook(hook_fn)
+
 
     def generate_candidates(self, image_path, question, context_string, num_beams=4, diversity_penalty=0.5):
         self.captured_attentions = []
