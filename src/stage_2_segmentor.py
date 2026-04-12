@@ -1,19 +1,17 @@
 import torch
 import numpy as np
-import cv2
 from PIL import Image
-from transformers import Sam2Model, Sam2Processor
+# Use the explicit SAM 3 classes for better feature support
+from transformers import Sam3Processor, Sam3Model 
 
 class Stage2Segmentor:
-    def __init__(self, model_id="facebook/sam2.1-hiera-large"):
-        """
-        Initializes SAM 2.1. This is the 'Hiera' architecture.
-        It is faster and more memory-efficient than SAM-ViT-Huge.
-        """
-        print(f"Loading Stage 2 Geometric Engine (SAM 2.1): {model_id}")
+    def __init__(self, model_id="facebook/sam3"):
+        print(f"Loading Stage 2 Geometric Engine (SAM 3): {model_id}")
         
-        self.processor = Sam2Processor.from_pretrained(model_id)
-        self.model = Sam2Model.from_pretrained(
+        # SAM 3 uses a complex tokenizer for text prompts; use_fast=False is safer here
+        self.processor = Sam3Processor.from_pretrained(model_id, use_fast=False)
+        
+        self.model = Sam3Model.from_pretrained(
             model_id,
             torch_dtype=torch.bfloat16,
             device_map="auto"
@@ -21,56 +19,44 @@ class Stage2Segmentor:
         self.model.eval()
 
     def generate_masks(self, image_path, bimodal_tuples):
-        """
-        Uses Qwen's logit heatmaps as 'mask prompts' for SAM 2.
-        """
         raw_image = Image.open(image_path).convert("RGB")
-        width, height = raw_image.size
-        
         final_masks = []
         mask_scores = []
         
         for candidate_text, dense_logit_prior in bimodal_tuples:
-            # 1. Prepare the mask prompt (SAM 2 expects 256x256 logits)
-            # We unsqueeze to add batch and object dimensions: [1, 1, 256, 256]
-            input_masks = dense_logit_prior.unsqueeze(0).unsqueeze(0)
+            # 1. Format the Bridge Output
+            # SAM 3 expects (Batch, 1, 256, 256) for mask inputs
+            dense_prompt_tensor = dense_logit_prior.unsqueeze(0).unsqueeze(0)
             
-            # 2. Process inputs for SAM 2
-            # Note: We provide the original image and the mask prompt.
+            # 2. Bimodal Prompting (Text + Latent Bridge Mask)
             inputs = self.processor(
-                images=raw_image, 
-                mask_input=input_masks, 
+                images=raw_image,
+                text=candidate_text, # Passing the Qwen-generated answer
+                input_masks=dense_prompt_tensor,
                 return_tensors="pt"
             ).to(self.model.device, dtype=torch.bfloat16)
 
-            # 3. Forward Pass
             with torch.no_grad():
                 outputs = self.model(**inputs)
 
-            # 4. Post-processing for SAM 2
-            # SAM 2 outputs masks at a lower resolution; we must upscale to the original image size.
-            masks = outputs.pred_masks.squeeze(0).squeeze(0) # [3, 256, 256]
-            iou_scores = outputs.iou_scores.squeeze()        # [3]
+            # 3. Post-Process (SAM 3 specialized method)
+            # This handles resizing the mask back to the original VizWiz image size
+            results = self.processor.post_process_instance_segmentation(
+                outputs,
+                threshold=0.5,
+                target_sizes=[(raw_image.size[1], raw_image.size[0])]
+            )[0]
 
-            # 5. Best Mask Selection (Granularity handling)
-            best_idx = torch.argmax(iou_scores)
-            best_mask_logits = masks[best_idx]
+            if len(results['masks']) > 0:
+                # We take the highest confidence mask for this concept
+                best_idx = torch.argmax(results['scores'])
+                final_masks.append(results['masks'][best_idx].cpu().numpy())
+                mask_scores.append(results['scores'][best_idx].item())
+            else:
+                # Fallback if SAM 3 finds nothing for that specific text
+                final_masks.append(np.zeros((raw_image.size[1], raw_image.size[0])))
+                mask_scores.append(0.0)
             
-            # 6. Binary Threshold & Upscale
-            # We move to CPU and convert to uint8 for high-speed OpenCV resizing
-            mask_np = (best_mask_logits > 0.0).cpu().numpy().astype(np.uint8)
-            
-            # Upscale to match the exact original image resolution for Stage 3 math
-            final_binary_mask = cv2.resize(
-                mask_np, 
-                (width, height), 
-                interpolation=cv2.INTER_NEAREST
-            ).astype(bool)
-
-            final_masks.append(final_binary_mask)
-            mask_scores.append(iou_scores[best_idx].item())
-            
-            # Memory Hygiene
             del inputs, outputs
             torch.cuda.empty_cache()
 
