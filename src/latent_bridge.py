@@ -96,27 +96,28 @@ class LatentBridge:
                     align_corners=False
                 ).squeeze() 
                 
+            
                 # ==========================================
-                # 🌉 SPATIAL CALIBRATION & SHARPENING
+                # 🌉 Z-SCORE SPATIAL CALIBRATION
                 # ==========================================
-                min_val = attn_grid_256.min()
-                max_val = attn_grid_256.max()
+                # 1. Calculate the statistical mean and spread of the attention
+                mean_val = attn_grid_256.mean()
+                std_val = attn_grid_256.std()
                 
-                # 1. Min-Max Normalize to [0.0, 1.0] to stretch the contrast
-                if max_val > min_val:
-                    normalized_attn = (attn_grid_256 - min_val) / (max_val - min_val)
+                # 2. Z-Score Standardization
+                # This shifts the average pixel to 0.0. 
+                # Background becomes negative. The object body becomes positive.
+                if std_val > 1e-6:
+                    z_scored_attn = (attn_grid_256 - mean_val) / std_val
                 else:
-                    normalized_attn = attn_grid_256
+                    z_scored_attn = attn_grid_256 - mean_val
                     
-                # 2. Quadratic Sharpening (Kills background static, spikes the target noun)
-                sharpened_attn = normalized_attn ** 2
-                
-                # 3. Safe Log-Odds Conversion
-                # We clamp to prevent math domain errors (infinity/-infinity)
-                clamped_attn = torch.clamp(sharpened_attn, min=1e-4, max=0.9999)
-                dense_logit_prior = torch.log(clamped_attn / (1.0 - clamped_attn))
+                # 3. Scale to SAM 3's Native Logit Range
+                # We multiply by 3.0 to stretch the Z-scores into a booming [-10 to +10] range.
+                # No clamped Log-Odds math required! This IS the logit tensor.
+                dense_logit_prior = z_scored_attn * 3.0
                 # ==========================================
-                
+
                 bimodal_tuples.append((str(candidate_text), dense_logit_prior))
                 
             return bimodal_tuples
