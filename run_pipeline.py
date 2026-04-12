@@ -152,8 +152,9 @@ def main():
     data_loader = VQADatasetLoader(CONFIG["dataset_dir"])
     val_dataset = data_loader.load_and_balance(split="val", force_balance=False)
     few_shot_context = data_loader.get_few_shot_context(n_shots=3)
+    local_qwen_path = "/kaggle/input/datasets/ruhul77/qwen2-vl-2b-instruct"
     
-    stage1 = Stage1Generator()
+    stage1 = Stage1Generator(model_id=local_qwen_path)
     bridge = LatentBridge(logit_scale_factor=CONFIG["logit_scale"])
     stage2 = Stage2Segmentor()
     stage3 = TopologicalEvaluator(w1_ciou=CONFIG["w1_ciou"], w2_conflict=CONFIG["w2_conflict"], threshold=CONFIG["threshold"])
