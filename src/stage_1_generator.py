@@ -23,53 +23,59 @@ class Stage1Generator:
         )
         self.model.eval()
         
-        # --- THE ROBUST ATTENTION INTERCEPTOR ---
+        # --- THE CONFIG OVERRIDE ---
+        # We force the model to always output attentions at the config level
+        # This overrides any mistakes the custom_generate script makes
+        self.model.config.output_attentions = True
+        # ---------------------------
+
         self.captured_attentions = []
 
         def hook_fn(module, input, output):
-            # In Qwen2-VL, the attention weights are typically the second element in the output tuple
-            if isinstance(output, tuple) and len(output) > 1:
-                # Detach and move to CPU to save VRAM for SAM 3
-                self.captured_attentions.append(output[1].detach().cpu())
+            # Qwen2-VL attention forward usually returns (attn_output, attn_weights, past_key_value)
+            # If output_attentions=True is working, output[1] is our target.
+            if isinstance(output, tuple):
+                if len(output) > 1 and output[1] is not None:
+                    self.captured_attentions.append(output[1].detach().cpu())
+                else:
+                    # Debug log if we hit the hook but weights are missing
+                    pass 
 
-        # DYNAMIC LAYER FINDER: We search for the VERY LAST attention module
-        # This bypasses the naming issues (.layers vs .h vs .blocks)
+        # Find the last self-attention layer
         target_layer = None
         for name, module in self.model.named_modules():
             if "self_attn" in name:
                 target_layer = module
         
         if target_layer is None:
-            raise AttributeError("❌ Could not find a 'self_attn' layer in this model architecture!")
+            raise AttributeError("❌ Could not find a 'self_attn' layer!")
             
-        print(f"✅ Successfully tapped attention layer: {target_layer.__class__.__name__}")
+        print(f"✅ Tapping: {target_layer.__class__.__name__}")
         self.hook = target_layer.register_forward_hook(hook_fn)
-        # ----------------------------------------
 
     def generate_candidates(self, image_path, question, context_string, num_beams=4, diversity_penalty=0.5):
-        # Reset the capture buffer for a fresh forward pass
         self.captured_attentions = []
 
-        # 1. Construct Prompt
+        # 1. Standard Prompting
         prompt_text = (f"{context_string}Target Image Analysis:\nQuestion: '{question}'\nPlausible Visual Answers:")
         messages = [{"role": "user", "content": [
             {"type": "image", "image": image_path, "max_pixels": 313600},
             {"type": "text", "text": prompt_text}
         ]}]
 
-        # 2. Process via MRoPE-aware template
+        # 2. Processor
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         image_inputs, video_inputs = process_vision_info(messages)
         inputs = self.processor(text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt").to(self.model.device)
 
-        # 3. Dynamic Token Locator for the Bridge
+        # 3. Dynamic Token Locator
         input_ids = inputs["input_ids"][0].cpu()
         image_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
         image_indices = (input_ids == image_token_id).nonzero(as_tuple=True)[0]
         start_idx = image_indices[0].item()
         end_idx = image_indices[-1].item() + 1
 
-        # 4. DBS Execution
+        # 4. DBS Execution with Explicit Attention Flag
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
@@ -81,20 +87,23 @@ class Stage1Generator:
                 diversity_penalty=diversity_penalty, 
                 num_return_sequences=num_beams,
                 return_dict_in_generate=True,      
-                output_attentions=True,            
+                output_attentions=True, # We keep this here too
                 do_sample=False,
                 use_cache=False 
             )
 
-        # 5. Package the Hooked Attention
-        # Since use_cache=False, the last capture in the buffer contains the full SeqLen x SeqLen attention map
+        # 5. The Hook Check
         if not self.captured_attentions:
-            raise ValueError("❌ Hook failed to capture attention. Check if 'output_attentions=True' is ignored by the custom script.")
-            
-        # We wrap it to match the Bridge's expected tuple format
-        final_bridge_attentions = [ (self.captured_attentions[-1],) ]
+            # Last ditch effort: Try to find any attention-like tensor in the output object
+            if hasattr(outputs, 'attentions') and outputs.attentions:
+                # If the script actually returned them in the standard way, use those
+                final_bridge_attentions = outputs.attentions
+            else:
+                raise ValueError("❌ Hook AND Native Attention both failed. Custom script is blocking attention flow.")
+        else:
+            final_bridge_attentions = [ (self.captured_attentions[-1],) ]
 
-        # 6. Parse Sequences
+        # 6. Parse sequences
         candidates_data = [] 
         for seq_idx in range(num_beams):
             generated_ids = outputs.sequences[seq_idx][len(inputs["input_ids"][0]):]
