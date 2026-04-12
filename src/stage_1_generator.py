@@ -17,17 +17,22 @@ class Stage1Generator:
 
         self.processor = AutoProcessor.from_pretrained(model_id)
         
-        # 1. LOAD WITH SDPA (Massive Speed & VRAM Savings)
+        # 1. LOAD WITH NATIVE EAGER MODE ON ISOLATED GPU
+        # Since SAM 3 is on cuda:0, Qwen gets cuda:1 all to itself.
+        # We have plenty of VRAM, so we don't need brittle SDPA hacks!
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
             model_id,
             quantization_config=bnb_config,
-            device_map="auto",
-            attn_implementation="sdpa" 
+            device_map="cuda:1", 
+            attn_implementation="eager" 
         )
         self.model.eval()
 
+        # Force native attention output at the config level
+        self.model.config.output_attentions = True
+
         # ==========================================
-        # 🧠 THE HYBRID ATTENTION SURGERY (MONKEY-PATCH)
+        # 🧠 THE CLEAN ATTENTION TAP
         # ==========================================
         target_layer_module = None
         target_layer_name = ""
@@ -40,48 +45,21 @@ class Stage1Generator:
         if target_layer_module is None:
             raise AttributeError("❌ Could not dynamically find a 'self_attn' layer!")
             
-        print(f"✅ Found exact target layer for surgery: {target_layer_name}")
+        print(f"✅ Tapping clean Eager layer: {target_layer_name}")
 
-        # 1. The Monkey-Patch
-        # We save the original mathematical forward pass
-        original_forward = target_layer_module.forward
-
-        def patched_forward(*args, **kwargs):
-            new_args = list(args)
-            # The signature is: forward(hidden_states, attention_mask, position_ids, past_key_value, output_attentions, ...)
-            # If it's passed as the 5th positional argument (index 4), overwrite it.
-            if len(new_args) > 4:
-                new_args[4] = True
-                # Remove from kwargs to prevent Python "multiple values" crash
-                kwargs.pop('output_attentions', None) 
-            else:
-                # If it wasn't passed positionally, force it via kwarg
-                kwargs['output_attentions'] = True
-                
-            return original_forward(*new_args, **kwargs)
-
-        # We violently overwrite the layer's forward pass with our patched version
-        target_layer_module.forward = patched_forward
-
-        # 2. Keep the Post-Hook to catch the matrix on its way out
+        # A standard hook (No monkey-patching required)
         self.captured_attentions = []
-        def post_hook_fn(module, input, output):
-            # output is (attn_output, attn_weights, past_key_value)
+        def hook_fn(module, input, output):
             if isinstance(output, tuple) and len(output) > 1 and output[1] is not None:
                 self.captured_attentions.append(output[1].detach().cpu())
 
-        self.hook = target_layer_module.register_forward_hook(post_hook_fn)
-        print("✅ Hybrid Attention Active: Monkey-Patch deployed successfully.")
+        self.hook = target_layer_module.register_forward_hook(hook_fn)
         # ==========================================
 
-
-
     def generate_candidates(self, image_path, question, context_string, num_beams=4, diversity_penalty=0.5):
-        # Clear buffer
         self.captured_attentions = []
 
-        # 1. Prompt Construction
-        # 1. Prompt Construction (AGGRESSIVE ALIGNMENT)
+        # 1. Aggressive Concrete Prompting
         prompt_text = (
             f"{context_string}"
             f"You are a precise bounding-box and segmentation detector. "
@@ -89,25 +67,22 @@ class Stage1Generator:
             f"STRICT RULE: NEVER use generic words like 'object', 'target', 'item', or 'picture'.\n"
             f"Question: '{question}'\n"
             f"Concrete Physical Answer:"
-        )        
+        )
         messages = [{"role": "user", "content": [
             {"type": "image", "image": image_path, "max_pixels": 313600},
             {"type": "text", "text": prompt_text}
         ]}]
 
-        # 2. Processing
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         image_inputs, video_inputs = process_vision_info(messages)
         inputs = self.processor(text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt").to(self.model.device)
 
-        # 3. Dynamic Token Locator for the Bridge
         input_ids = inputs["input_ids"][0].cpu()
         image_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
         image_indices = (input_ids == image_token_id).nonzero(as_tuple=True)[0]
         start_idx = image_indices[0].item()
         end_idx = image_indices[-1].item() + 1
 
-        # 4. DBS Execution (CRITICAL: output_attentions=True is REMOVED from here)
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
@@ -119,16 +94,16 @@ class Stage1Generator:
                 diversity_penalty=diversity_penalty, 
                 num_return_sequences=num_beams,
                 return_dict_in_generate=True,      
+                output_attentions=True, 
                 do_sample=False,
                 use_cache=False 
             )
 
-        # 5. Extract Hooked Attention
         if not self.captured_attentions:
-            raise ValueError("❌ Hook failed to capture attention. Check Hybrid Surgery setup.")
+            raise ValueError("❌ Hook failed to capture attention. Ensure eager mode is active.")
+        
         final_bridge_attentions = [ (self.captured_attentions[-1],) ]
 
-        # 6. Parse Sequences
         candidates_data = [] 
         for seq_idx in range(num_beams):
             generated_ids = outputs.sequences[seq_idx][len(inputs["input_ids"][0]):]
@@ -140,7 +115,6 @@ class Stage1Generator:
                 else: candidates_data.append((decoded_text, seq_idx))
             except: candidates_data.append((decoded_text, seq_idx))
 
-        # Memory Cleanup
         del inputs
         torch.cuda.empty_cache()
         
