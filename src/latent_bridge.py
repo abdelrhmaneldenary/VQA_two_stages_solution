@@ -60,22 +60,32 @@ class LatentBridge:
     def process_bimodal_tuples(self, candidates_data, outputs, image_token_start, image_token_end):
         bimodal_tuples = []
         
+        # --- ROBUST HANDSHAKE ---
+        # If Stage 1 passed us the raw hook data (a tuple/list), use it directly.
+        # Otherwise, try to extract the .attentions attribute from a HF object.
+        if isinstance(outputs, (list, tuple)):
+            attentions_to_process = outputs
+        elif hasattr(outputs, 'attentions'):
+            attentions_to_process = outputs.attentions
+        else:
+            raise ValueError(f"❌ Latent Bridge received unrecognized output type: {type(outputs)}")
+        # ------------------------
+        
         for item in candidates_data:
-            # Safely unpack the Text and the Sequence Index
             if isinstance(item, tuple) and len(item) == 2:
                 candidate_text, seq_idx = item
             else:
                 candidate_text = item
-                seq_idx = 0 # Fallback if indexing fails
+                seq_idx = 0 
                 
             doc = self.nlp(str(candidate_text))
             semantic_tokens = [token.text for token in doc if token.pos_ in self.valid_pos]
             if not semantic_tokens:
                 semantic_tokens = [str(candidate_text)]
                 
-            # Cross the bridge with the specific sequence index!
+            # Use the verified attentions_to_process
             attn_grid_2d = self._extract_and_reshape_attention(
-                outputs.attentions, 
+                attentions_to_process, 
                 image_token_start, 
                 image_token_end,
                 seq_idx=seq_idx
