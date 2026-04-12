@@ -11,10 +11,10 @@ from sklearn.metrics import f1_score, precision_score, recall_score, precision_r
 
 # Import our custom modular architecture
 from src.data_loader import VQADatasetLoader
-from src.stage1_generator import Stage1Generator
+from src.stage_1_generator import Stage1Generator
 from src.latent_bridge import LatentBridge
-from src.stage2_segmentor import Stage2Segmentor
-from src.stage3_topology import TopologicalEvaluator
+from src.stage_2_segmentor import Stage2Segmentor
+from src.stage_3_topology import TopologicalEvaluator
 
 # ==========================================
 # Artifact & Visualization Helpers
