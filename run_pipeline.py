@@ -263,38 +263,41 @@ def log_experiment(run_id, notes, config, metrics, pr_auc, log_file="experiment_
             f"{metrics['vizwiz_f1']:.2f}", f"{metrics['vizwiz_precision']:.2f}", f"{metrics['vizwiz_recall']:.2f}",
             f"{metrics['single_recall']:.2f}", f"{metrics['multiple_recall']:.2f}", f"{pr_auc:.4f}"
         ])
-def debug_visualize(image_path, point, masks, candidate_texts, idx, base_dir):
+import matplotlib.pyplot as plt
+from IPython.display import display, Image as IPImage
+
+def debug_visualize(image_path, bimodal_tuples, masks, idx, base_dir):
     """
-    Renders a 1x2 plot: 
-    Left: Raw Image + Qwen Point Anchor
-    Right: Raw Image + SAM 3 Mask Overlays
+    Renders a 1x2 diagnostic plot.
     """
     img = Image.open(image_path).convert("RGB")
     fig, ax = plt.subplots(1, 2, figsize=(15, 7))
     
-    # --- Left: Stage 1 Perception ---
+    # Left: Qwen Anchor Points
     ax[0].imshow(img)
-    ax[0].scatter(point[0], point[1], c='red', s=100, edgecolors='white', label='Qwen Anchor')
-    ax[0].set_title(f"Image {idx}: Qwen Anchor Point")
-    ax[0].legend()
+    colors = ['red', 'blue', 'green', 'yellow', 'magenta']
+    for i, (text, pt) in enumerate(bimodal_tuples):
+        c = colors[i % len(colors)]
+        ax[0].scatter(pt[0], pt[1], s=200, color=c, edgecolors='white', label=f'{text}')
+        ax[0].text(pt[0]+10, pt[1]+10, text, color='white', fontsize=12, backgroundcolor='black')
+    ax[0].set_title(f"Image {idx}: Qwen Anchor Points")
     
-    # --- Right: Stage 2 Output ---
+    # Right: SAM 3 Masks
     ax[1].imshow(img)
+    mask_found = False
     for i, mask in enumerate(masks):
         if np.any(mask):
-            # Create a random color for each mask
-            color = np.random.rand(3)
+            mask_found = True
             overlay = np.zeros((*mask.shape, 4))
-            overlay[mask > 0] = [*color, 0.5] # 50% opacity
+            overlay[mask > 0] = [0, 1, 0, 0.4] # Green masks
             ax[1].imshow(overlay)
-            ax[1].set_title(f"SAM 3 Masks for: {candidate_texts}")
-        else:
-            ax[1].set_title("SAM 3: ZERO PIXELS GENERATED")
-
+    
+    ax[1].set_title("SAM 3: Masks" if mask_found else "SAM 3: EMPTY")
+    
     plt.tight_layout()
-    # Save to artifacts so you can view it in the Kaggle 'Output' tab
-    plt.savefig(f"{base_dir}/debug_telemetry_{idx}.png")
-    plt.show() # Also show in console if using a Notebook
+    save_path = f"{base_dir}/debug_{idx}.png"
+    plt.savefig(save_path)
+    plt.show() # <--- This will show the image in your Kaggle Cell!
     plt.close()
 
 # ==========================================
@@ -352,8 +355,13 @@ def main():
             final_masks, _ = stage2.generate_masks(img_path, bimodal_tuples)
             
             # --- VISUAL TELEMETRY ---
-            debug_visualize(img_path, bimodal_tuples, final_masks, idx, artifact_dir)
-            
+            debug_visualize(
+                image_path=item["resolved_image_path"], 
+                bimodal_tuples=bimodal_tuples, 
+                masks=final_masks, 
+                idx=idx, 
+                base_dir=artifact_dir # Matches the 5 arguments now
+            )            
             # 4. Topology (D_Score)
             prediction, d_score = stage3.evaluate(final_masks)
             ground_truth = 1 if item.get("binary_label") == "single" else 0

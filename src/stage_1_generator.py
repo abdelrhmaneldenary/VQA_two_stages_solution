@@ -44,7 +44,7 @@ class Stage1Generator:
             
         # Target an upper-middle layer (75% depth) instead of the final text-generation layer.
         # This guarantees we capture crisp spatial reasoning before it diffuses into pure semantics.
-        target_idx = int(len(attn_modules) * 0.75)
+        target_idx = int(len(attn_modules) * 0.5)
         target_layer_name, target_layer_module = attn_modules[target_idx]
             
         print(f"✅ Tapping crisp spatial Eager layer: {target_layer_name} (Layer {target_idx}/{len(attn_modules)})")

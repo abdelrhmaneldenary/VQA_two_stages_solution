@@ -35,11 +35,13 @@ class LatentBridge:
         focus_attn = avg_attn[-1, :]
 
         image_attn_1d = focus_attn[image_token_start:image_token_end]
-
-        if image_attn_1d.max() > 0:
-            image_attn_1d = image_attn_1d / image_attn_1d.max()
-            
         expected_tokens = grid_h * grid_w
+
+        
+        if image_attn_1d.shape[0] > expected_tokens:
+            # Drop the first token (often a global/prefix token) to find the real pixels
+            image_attn_1d = image_attn_1d[1:expected_tokens+1]
+            
         image_attn_2d = image_attn_1d[:expected_tokens].view(1, 1, grid_h, grid_w)
         return image_attn_2d    
 
