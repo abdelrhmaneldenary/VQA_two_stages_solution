@@ -1,7 +1,7 @@
 import os
 import torch
 from transformers import AutoModel, AutoProcessor # Using AutoModel here
-
+import gc
 class Stage2Segmenter:
     def __init__(self, model_id):
         # 1. Force the Kaggle absolute path
@@ -91,20 +91,55 @@ class Stage2Segmenter:
 
         return self._blank_mask(image), 0.0
 
+
+
     def generate_masks(self, image_or_path, labels):
         image = self._to_image(image_or_path)
         masks = []
         scores = []
 
         for label in labels:
-            inputs = self.processor(text=label, images=image, return_tensors="pt")
-            inputs = {k: v.to(self.model.device) if torch.is_tensor(v) else v for k, v in inputs.items()}
+            try:
+                # 1. THE PROCESSOR BYPASS (Fixes the 'text' kwarg error)
+                image_inputs = self.processor.image_processor(images=image, return_tensors="pt")
+                text_inputs = self.processor.tokenizer(text=label, padding=True, return_tensors="pt")
+                
+                # Merge the dictionaries explicitly
+                inputs = {**image_inputs, **text_inputs}
+                inputs = {k: v.to(self.model.device) if torch.is_tensor(v) else v for k, v in inputs.items()}
 
-            with torch.no_grad():
-                generated = self.model.generate(**inputs, max_new_tokens=16)
+                # 2. THE FORWARD PASS (Fixes the 'generate' missing attribute error)
+                with torch.no_grad():
+                    outputs = self.model(**inputs)
 
-            mask, score = self._mask_from_generated(generated, inputs, image)
-            masks.append(mask)
-            scores.append(score)
+                # 3. NATIVE MASK EXTRACTION (SAM outputs spatial masks directly)
+                if hasattr(outputs, "pred_masks"):
+                    # Standard SAM format
+                    mask = (outputs.pred_masks > 0.0).squeeze().cpu().numpy()
+                else:
+                    # Fallback if custom weights use a tuple output
+                    mask = (outputs[0] > 0.0).squeeze().cpu().numpy()
+
+                # Ensure mask is 2D (Height x Width)
+                if mask.ndim > 2:
+                    mask = mask[0]
+
+                # SAM usually outputs IoU scores; default to 1.0 if not found
+                score = outputs.iou_scores.squeeze().cpu().numpy() if hasattr(outputs, "iou_scores") else 1.0
+
+                masks.append(mask)
+                scores.append(score)
+
+            except Exception as e:
+                print(f"⚠️ Stage 2 OOM/Error on label '{label}': {e}")
+                # Emit a blank mask to keep the pipeline moving
+                blank_mask = np.zeros((image.height, image.width), dtype=bool)
+                masks.append(blank_mask)
+                scores.append(0.0)
+
+            finally:
+                # Per-label memory flush to prevent mid-image OOM spikes
+                torch.cuda.empty_cache()
+                gc.collect()
 
         return masks, scores
