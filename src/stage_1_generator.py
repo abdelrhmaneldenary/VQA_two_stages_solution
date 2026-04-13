@@ -94,7 +94,7 @@ class Stage1Generator:
         if not labels:
             labels = ["object"]
 
-        if len(labels) < candidate_count:
+        if len(labels) < candidate_count and labels:
             labels.extend([labels[-1]] * (candidate_count - len(labels)))
 
         return candidate_count, labels[:candidate_count]

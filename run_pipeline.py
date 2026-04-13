@@ -75,7 +75,14 @@ def main():
             masks, _ = stage2.generate_masks(img_path, labels)
             pred, max_iou = classify_from_masks(masks, threshold=CONFIG["iou_threshold"])
 
-            gt = 1 if item.get("binary_label") == "single" else 0
+            binary_label = str(item.get("binary_label", "")).strip().lower()
+            if binary_label == "single":
+                gt = 1
+            elif binary_label == "multiple":
+                gt = 0
+            else:
+                print(f"[{idx + 1}/{len(val_dataset)}] skipped: invalid binary_label={item.get('binary_label')}")
+                continue
             y_true.append(gt)
             y_pred.append(pred)
 
