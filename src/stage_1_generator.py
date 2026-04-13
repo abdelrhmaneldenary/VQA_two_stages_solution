@@ -64,10 +64,18 @@ class Stage1Generator:
         """
         self.captured_attentions = []
 
+        # ==========================================
+        # 🎯 THE MACRO-LEVEL PROMPT ENGINEERING
+        # ==========================================
         prompt_text = (
-            f"{context_string}\n"
-            f"Task: Answer the question by listing all distinct, concrete, physical nouns visible in the image.\n"
-            f"Rules: NEVER use generic words ('object', 'item'). Output ONLY a bracketed list of noun phrases.\n\n"
+            f"{context_string}\n" # <--- Few-shot examples are injected right here
+            f"Task: Answer the question by listing the distinct, concrete, physical objects visible in the image.\n"
+            f"Rules:\n"
+            f"1. NO DENSE CAPTIONING: Never break a single contiguous object into its component parts (e.g., if it's a laptop, output 'laptop', do NOT output 'screen', 'keyboard').\n"
+            f"2. GROUP FUNCTIONAL UNITS: If items sit in the exact same location and form one unit (e.g., 'couch' and 'pillows'), output only the macro-name ('couch').\n"
+            f"3. PRESERVE DISTINCT SEPARATION: If there are spatially separate, physically distinct objects (e.g., two cars parked next to each other, or three separate people), you MUST list each one individually.\n"
+            f"4. NEVER use generic words ('object', 'item', 'picture').\n"
+            f"5. Output ONLY a Python bracketed list of string noun phrases.\n\n"
             f"Target Image Analysis:\n"
             f"Question: '{question}'\n"
             f"Plausible Visual Answers:"
@@ -86,9 +94,6 @@ class Stage1Generator:
         inputs = self.processor(text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt").to(self.model.device)
 
         # --- THE ASPECT RATIO & PATCH MERGE FIX ---
-        # Capture the true geometric shape of the image patches.
-        # Qwen2-VL heavily compresses images by merging 2x2 patch blocks into a single token.
-        # We MUST divide the raw grid height and width by 2 to match the actual LLM sequence space!
         image_grid_thw = inputs["image_grid_thw"][0] # Shape: (Time, Height, Width)
         grid_h = image_grid_thw[1].item() // 2       # Divide by 2
         grid_w = image_grid_thw[2].item() // 2       # Divide by 2
@@ -148,5 +153,4 @@ class Stage1Generator:
         del inputs
         torch.cuda.empty_cache()
         
-        # Return the true physical constraints (grid_h, grid_w) alongside the sequences
         return candidates_data, final_bridge_attentions, start_idx, end_idx, grid_h, grid_w
