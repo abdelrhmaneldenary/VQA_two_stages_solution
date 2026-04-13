@@ -90,6 +90,11 @@ class LatentBridge:
                 padding=1
             ).squeeze()
             
+            smoothed_attn[0, :] = 0.0   # Top edge
+            smoothed_attn[-1, :] = 0.0  # Bottom edge
+            smoothed_attn[:, 0] = 0.0   # Left edge
+            smoothed_attn[:, -1] = 0.0
+            
             flat_idx = torch.argmax(smoothed_attn)
             # ---------------------------------------------------
             

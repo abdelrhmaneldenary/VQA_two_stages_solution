@@ -69,7 +69,7 @@ class Stage2Segmentor:
             # 5. POST PROCESSING
             results = self.processor.post_process_instance_segmentation(
                 outputs,
-                threshold=0.1, 
+                threshold=0.0, 
                 target_sizes=[(orig_h, orig_w)]
             )[0]
 
