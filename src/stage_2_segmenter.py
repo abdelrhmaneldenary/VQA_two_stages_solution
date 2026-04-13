@@ -1,8 +1,7 @@
 import numpy as np
 import torch
 from PIL import Image
-from transformers import AutoModelForVision2Seq, AutoProcessor
-
+from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 
 class Stage2Segmenter:
     def __init__(self, model_id="facebook/sam3-h"):
