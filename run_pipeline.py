@@ -3,6 +3,7 @@ import os
 from datetime import datetime
 
 import numpy as np
+from PIL import Image
 from sklearn.metrics import f1_score, precision_score, recall_score
 
 from src.config import CONFIG
@@ -53,6 +54,13 @@ def log_experiment(metrics, run_id, timestamp, csv_path="experiment_tracker.csv"
         )
 
 
+def resize_for_vram(image_path, max_dim=1024):
+    image = Image.open(image_path).convert("RGB")
+    if max(image.size) > max_dim:
+        image.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+    return image
+
+
 def main():
     print(f"🚀 Running: {CONFIG['run_id']}")
     run_date = datetime.now().strftime("%Y-%m-%d")
@@ -71,8 +79,9 @@ def main():
         question = item["question"]
 
         try:
-            count, labels = stage1.generate_grounding_plan(img_path, question)
-            masks, _ = stage2.generate_masks(img_path, labels)
+            image = resize_for_vram(img_path, max_dim=1024)
+            count, labels = stage1.generate_grounding_plan(image, question)
+            masks, _ = stage2.generate_masks(image, labels)
             pred, max_iou = classify_from_masks(masks, threshold=CONFIG["iou_threshold"])
 
             binary_label = str(item.get("binary_label", "")).strip().lower()

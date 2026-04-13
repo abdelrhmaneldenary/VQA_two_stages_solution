@@ -109,7 +109,9 @@ class Stage2Segmenter:
         scores = []
 
         for label in labels:
-            inputs = self.processor(text=label, images=image, return_tensors="pt")
+            image_inputs = self.processor.image_processor(images=image, return_tensors="pt")
+            text_inputs = self.processor.tokenizer(text=label, padding=True, return_tensors="pt")
+            inputs = {**image_inputs, **text_inputs}
             inputs = {k: v.to(self.model.device) if torch.is_tensor(v) else v for k, v in inputs.items()}
 
             try:
