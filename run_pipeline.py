@@ -263,117 +263,119 @@ def log_experiment(run_id, notes, config, metrics, pr_auc, log_file="experiment_
             f"{metrics['vizwiz_f1']:.2f}", f"{metrics['vizwiz_precision']:.2f}", f"{metrics['vizwiz_recall']:.2f}",
             f"{metrics['single_recall']:.2f}", f"{metrics['multiple_recall']:.2f}", f"{pr_auc:.4f}"
         ])
+def debug_visualize(image_path, point, masks, candidate_texts, idx, base_dir):
+    """
+    Renders a 1x2 plot: 
+    Left: Raw Image + Qwen Point Anchor
+    Right: Raw Image + SAM 3 Mask Overlays
+    """
+    img = Image.open(image_path).convert("RGB")
+    fig, ax = plt.subplots(1, 2, figsize=(15, 7))
+    
+    # --- Left: Stage 1 Perception ---
+    ax[0].imshow(img)
+    ax[0].scatter(point[0], point[1], c='red', s=100, edgecolors='white', label='Qwen Anchor')
+    ax[0].set_title(f"Image {idx}: Qwen Anchor Point")
+    ax[0].legend()
+    
+    # --- Right: Stage 2 Output ---
+    ax[1].imshow(img)
+    for i, mask in enumerate(masks):
+        if np.any(mask):
+            # Create a random color for each mask
+            color = np.random.rand(3)
+            overlay = np.zeros((*mask.shape, 4))
+            overlay[mask > 0] = [*color, 0.5] # 50% opacity
+            ax[1].imshow(overlay)
+            ax[1].set_title(f"SAM 3 Masks for: {candidate_texts}")
+        else:
+            ax[1].set_title("SAM 3: ZERO PIXELS GENERATED")
+
+    plt.tight_layout()
+    # Save to artifacts so you can view it in the Kaggle 'Output' tab
+    plt.savefig(f"{base_dir}/debug_telemetry_{idx}.png")
+    plt.show() # Also show in console if using a Notebook
+    plt.close()
 
 # ==========================================
 # The Main Orchestrator
 # ==========================================
 def main():
-    print(f"🚀 Initializing Run: {CONFIG['run_id']}")
+    print(f"🚀 Initializing DEBUG Run: {CONFIG['run_id']}")
     artifact_dir = create_artifact_dirs(CONFIG["run_id"])
     
     data_loader = VQADatasetLoader(CONFIG["dataset_dir"])
     val_dataset = data_loader.load_and_balance(split="val", force_balance=False)
-    few_shot_context = " "
+    few_shot_context = " " # Or your loaded context
 
+    # --- Standard Init ---
     stage1 = Stage1Generator(model_id=CONFIG["model_s1_path"])  
-    bridge = LatentBridge()    
+    bridge = LatentBridge() # Ensure this matches our updated no-arg Bridge
     stage2 = Stage2Segmentor(model_id=CONFIG["model_s2_path"])
-    stage3 = TopologicalEvaluator(w1_ciou=CONFIG["w1_ciou"], w2_conflict=CONFIG["w2_conflict"], threshold=CONFIG["threshold"])
+    stage3 = TopologicalEvaluator(w1_ciou=CONFIG["w1_ciou"], w2_conflict=CONFIG["w2_conflict"])
 
+    # Limit to 10 for Real Debugging
+    test_subset = val_dataset[:10] 
+    
     y_true, y_pred, y_scores, sources = [], [], [], []
-    saved_viz_count = 0
-    
-    test_subset = val_dataset # Full Dataset Execution!
-    
+
     for idx, item in enumerate(test_subset):
-        print(f"\nProcessing Image {idx+1}/{len(test_subset)}: {item['question']}")
+        img_path = item["resolved_image_path"]
+        print(f"\n[IMAGE {idx+1}/10] Question: {item['question']}")
         
         try:
-            # Get the true raw image size for the affine math in Stage 2
-            raw_w, raw_h = Image.open(item["resolved_image_path"]).size
+            # Get dimensions for affine verification
+            raw_w, raw_h = Image.open(img_path).size
+            print(f"   -> 📐 Native Resolution: {raw_w}x{raw_h}")
             
-            # 1. Semantics (Now unpacking 6 values instead of 4)
+            # 1. Semantics (Stage 1)
             candidates, qwen_outputs, start_idx, end_idx, grid_h, grid_w = stage1.generate_candidates(
-                item["resolved_image_path"], 
-                item["question"], 
-                few_shot_context, 
-                num_beams=CONFIG["num_beams"], 
-                diversity_penalty=CONFIG["lambda_penalty"]
+                img_path, item["question"], few_shot_context, num_beams=CONFIG["num_beams"]
             )
+            print(f"   -> 🧠 Qwen Grid: {grid_w}w x {grid_h}h (Tokens: {grid_w*grid_h})")
             
-            # 2. Bridge (Now passing the physical constraints)
+            # 2. Bridge (Point Extraction)
             bimodal_tuples = bridge.process_bimodal_tuples(
-                candidates_data=candidates, 
-                outputs=qwen_outputs, 
-                image_token_start=start_idx, 
-                image_token_end=end_idx,
-                grid_h=grid_h,
-                grid_w=grid_w,
-                raw_image_size=(raw_w, raw_h)
+                candidates, qwen_outputs, start_idx, end_idx, grid_h, grid_w, (raw_w, raw_h)
             )
+
+            # --- COORDINATE LOGGING ---
+            for text, pt in bimodal_tuples:
+                print(f"   -> 🌉 Bridge Anchor: '{text}' at Pixel (X:{pt[0]}, Y:{pt[1]})")
 
             # VRAM Safety
             del qwen_outputs
             torch.cuda.empty_cache()
             gc.collect()
 
-            # 3. Geometry
-            final_masks, _ = stage2.generate_masks(item["resolved_image_path"], bimodal_tuples)
+            # 3. Geometry (SAM 3)
+            final_masks, _ = stage2.generate_masks(img_path, bimodal_tuples)
             
-            # 4. Topology
+            # --- VISUAL TELEMETRY ---
+            debug_visualize(img_path, bimodal_tuples, final_masks, idx, artifact_dir)
+            
+            # 4. Topology (D_Score)
             prediction, d_score = stage3.evaluate(final_masks)
             ground_truth = 1 if item.get("binary_label") == "single" else 0
             
+            valid_count = sum([1 for m in final_masks if np.any(m)])
+            print(f"   -> 📐 Stage 2 Result: {valid_count}/{len(final_masks)} masks contain pixels.")
+            print(f"   -> ⚖️ D_Score: {d_score:.3f} | Pred: {prediction} | True: {ground_truth}")
+
             y_pred.append(prediction)
             y_true.append(ground_truth)
-            sources.append(item.get("source", "Unknown"))
             y_scores.append(1.0 - d_score)
-            
-            # ==========================================
-            # 🔍 THE ENGINEERING HEARTBEAT
-            # ==========================================
-            pred_text = "Single" if prediction == 1 else "Multiple"
-            true_text = "Single" if ground_truth == 1 else "Multiple"
-            
-            candidate_words = [c[0] for c in candidates]
-            print(f"   -> 🧠 Stage 1 (Semantics): {candidate_words}")
-            
-            if bimodal_tuples:
-                sample_point = bimodal_tuples[0][1]
-                print(f"   -> 🌉 Latent Bridge     : Point Anchor at (X: {sample_point[0]}, Y: {sample_point[1]})")
-            
-
-            valid_masks = [m for m in final_masks if np.any(m)]
-            print(f"   -> 📐 Stage 2 (Geometry) : {len(valid_masks)}/{len(final_masks)} masks contain valid pixels.")
-            
-            if prediction == ground_truth:
-                print(f"   -> ✅ MATCH | D_Score: {d_score:.3f} | Pred: {pred_text} | True: {true_text}")
-            else:
-                print(f"   -> ❌ FAIL  | D_Score: {d_score:.3f} | Pred: {pred_text} | True: {true_text}")
-            print("-" * 50)
-            # ==========================================
-
-            # Save Top 100 Divergence Proofs for Thesis
-            if d_score > 0.4 and saved_viz_count < 100:
-                save_topology_visualization(item["resolved_image_path"], final_masks, d_score, CONFIG["run_id"], idx, artifact_dir)
-                saved_viz_count += 1
+            sources.append(item.get("source", "Unknown"))
 
         except Exception as e:
-            print(f"  -> ❌ Pipeline failed: {str(e)}")
-            print("\n--- 🛑 ENGINEERING STACK TRACE ---")
+            print(f"   -> ❌ CRITICAL FAILURE at Image {idx}: {e}")
             traceback.print_exc()
-            print("----------------------------------\n")
-            break
-        
-        torch.cuda.empty_cache()
-        gc.collect()
+            break # Stop and inspect the fail
 
-    # 5. Final Evaluation
+    # Final PR-AUC for the 10-image subset
     if len(y_pred) > 0:
         pr_auc = save_pr_curve(y_true, y_scores, CONFIG["run_id"], artifact_dir)
-        metrics = calculate_stratified_metrics(y_true, y_pred, sources, CONFIG["run_id"], pr_auc)
-        log_experiment(CONFIG["run_id"], CONFIG["notes"], CONFIG, metrics, pr_auc)
-        print(f"✅ All artifacts saved to /artifacts/{CONFIG['run_id']}/")
+        print(f"\n✅ Debug Telemetry complete. Check /artifacts/{CONFIG['run_id']} for PNGs.")
 
 if __name__ == "__main__":
     main()
