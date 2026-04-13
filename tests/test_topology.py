@@ -138,7 +138,7 @@ def test_part_to_whole_distant_containment_is_single(evaluator):
     """
     H, W = 600, 800
     couch_mask = _make_rect_mask(H, W, 100, 560, 80, 760)
-    pillow_mask = _make_rect_mask(H, W, 330, 520, 520, 740)  # inside couch
+    pillow_mask = _make_rect_mask(H, W, 330, 520, 520, 740)  # contained in couch's right region
 
     pred, score = evaluator.evaluate(
         [couch_mask, pillow_mask],

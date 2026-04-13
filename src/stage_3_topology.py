@@ -3,7 +3,7 @@ import cv2
 import re
 
 class TopologicalEvaluator:
-    LABEL_STOPWORDS = {"a", "an", "the", "of", "on", "in", "for", "with", "and"}
+    LABEL_STOPWORDS = {"a", "an", "the", "of", "on", "in", "for", "with", "and", "at", "by", "to", "from", "or", "but", "as", "if"}
     SEMANTIC_JACCARD_THRESHOLD = 0.6
     SEMANTIC_CONTAINMENT_THRESHOLD = 0.8
 
@@ -78,7 +78,7 @@ class TopologicalEvaluator:
 
         jaccard = len(inter) / len(ta.union(tb))
         containment = min(len(inter) / len(ta), len(inter) / len(tb))
-        # Conservative lexical-equivalence rule for synonyms/aliases.
+        # Lexical-equivalence rule for synonyms/aliases.
         return jaccard >= self.SEMANTIC_JACCARD_THRESHOLD or containment >= self.SEMANTIC_CONTAINMENT_THRESHOLD
 
     def _calculate_anchor_separation(self, anchor_points, image_size):

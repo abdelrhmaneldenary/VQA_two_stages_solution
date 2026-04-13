@@ -85,7 +85,9 @@ class Stage1Generator:
         except Exception:
             pass
 
-        # 2) Key:value JSON-like text extraction (handles malformed braces safely)
+        # 2) Key:value JSON-like text extraction (handles malformed braces safely).
+        # 'object' can appear as a structural key in malformed outputs, while
+        # generic values like "object" are still filtered by GENERIC_BANLIST.
         kv_text_hits = re.findall(
             r"""(?i)["']?(?:text|label|object|name|noun)["']?\s*:\s*["']([^"']+)["']""",
             decoded_text,
