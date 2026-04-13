@@ -142,7 +142,7 @@ def main():
     y_true, y_pred, y_scores, sources = [], [], [], []
     saved_viz_count = 0
     
-    test_subset = [item for item in val_dataset if item.get("binary_label") == "multiple"][:10]
+    test_subset = val_dataset
     for idx, item in enumerate(test_subset):
         img_path = item["resolved_image_path"]
         print(f"\n[IMAGE {idx+1}/{len(test_subset)}] Question: {item['question']}")
