@@ -118,7 +118,7 @@ class Stage1Generator:
                 return_dict_in_generate=True,      
                 output_attentions=True, 
                 do_sample=False,
-                use_cache=True 
+                use_cache=False 
             )
 
         if not self.captured_attentions:
