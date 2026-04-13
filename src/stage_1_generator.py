@@ -27,6 +27,11 @@ class Stage1Generator:
             local_files_only=True if os.path.exists(model_id) else False
         )
         self.model.eval()
+        if getattr(self.model, "generation_config", None) is not None:
+            self.model.generation_config.do_sample = False
+            for attr in ("temperature", "top_p", "top_k"):
+                if hasattr(self.model.generation_config, attr):
+                    setattr(self.model.generation_config, attr, None)
 
 
     def _run_prompt(self, image_path, prompt, max_new_tokens=64):
