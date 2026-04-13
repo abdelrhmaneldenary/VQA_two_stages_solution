@@ -1,6 +1,7 @@
 import numpy as np
 import cv2
 import re
+import math
 from difflib import SequenceMatcher
 
 class TopologicalEvaluator:
@@ -12,6 +13,7 @@ class TopologicalEvaluator:
     SAME_MASK_IOU = 0.98  # near-identical geometry gate
     STRONG_CONTAINMENT_IOM = 0.98  # near-complete parent-child containment gate
     STRONG_CONTAINMENT_AREA_RATIO = 0.6  # child must be meaningfully smaller than parent
+    DUP_TEXT_ANCHOR_SEP_THRESHOLD = 0.15  # keep both if duplicate text is spatially far
 
     def __init__(self, w1_ciou=0.4, w2_conflict=0.6, w3_anchor=0.5, w3_semantic=None, threshold=0.045):
         print("🚀 Initializing VizWiz Geometry+Semantic Topological Evaluator...")
@@ -140,6 +142,17 @@ class TopologicalEvaluator:
                     max_dist = dist
         return min(1.0, max_dist)
 
+    def _pair_anchor_distance(self, anchor_a, anchor_b, image_size):
+        if image_size is None:
+            return 0.0
+        img_w, img_h = image_size
+        diagonal = math.hypot(img_w, img_h)
+        if diagonal == 0:
+            return 0.0
+        ax, ay = anchor_a
+        bx, by = anchor_b
+        return math.hypot(ax - bx, ay - by) / diagonal
+
     def _calculate_conflict_ratio(self, masks):
         all_contour_points = []
         for mask in masks:
@@ -235,6 +248,10 @@ class TopologicalEvaluator:
                     if valid_labels is not None
                     else True
                 )
+                same_label_text = (
+                    valid_labels is not None
+                    and self._normalize_label(valid_labels[i]) == self._normalize_label(valid_labels[j])
+                )
 
                 # Part-to-whole should always absorb when containment is near-complete.
                 if strong_containment:
@@ -243,6 +260,12 @@ class TopologicalEvaluator:
 
                 # Near-identical geometry: absorb only when labels are equivalent.
                 if same_shape:
+                    # Duplicate text on distant anchors (same string printed twice) should survive.
+                    if same_label_text and valid_anchors is not None:
+                        sep = self._pair_anchor_distance(valid_anchors[i], valid_anchors[j], image_size)
+                        if sep > self.DUP_TEXT_ANCHOR_SEP_THRESHOLD:
+                            continue
+
                     if semantic_match:
                         is_absorbed = True
                         break
@@ -282,11 +305,17 @@ class TopologicalEvaluator:
         avg_overlap = overlap_sum / pairs if pairs > 0 else 0.0
         conflict_ratio = self._calculate_conflict_ratio(final_masks)
         semantic_divergence = self._calculate_semantic_divergence(final_labels)
+        anchor_sep = (
+            self._calculate_anchor_separation(final_anchors, image_size)
+            if final_anchors is not None and image_size is not None
+            else 0.0
+        )
+        tie_breaker_divergence = max(semantic_divergence, anchor_sep)
 
         d_score = (
             (self.W1 * (1.0 - avg_overlap))
             + (self.W2 * conflict_ratio)
-            + (self.W3 * semantic_divergence)
+            + (self.W3 * tie_breaker_divergence)
         )
 
         classification = 0 if d_score >= self.threshold else 1

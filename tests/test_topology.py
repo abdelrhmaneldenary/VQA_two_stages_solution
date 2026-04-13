@@ -107,6 +107,21 @@ def test_ocr_same_mask_close_anchors_is_single(evaluator):
     assert pred == 1, f"Collocated OCR must be SINGLE; got Multiple (D_Score={score:.4f})"
 
 
+def test_duplicate_text_same_mask_far_anchors_is_multiple(evaluator):
+    """
+    Duplicate label text printed in distant regions should not be absorbed.
+    """
+    H, W = 480, 640
+    bottle_mask = _make_rect_mask(H, W, 100, 380, 220, 420)
+    pred, score = evaluator.evaluate(
+        [bottle_mask.copy(), bottle_mask.copy()],
+        anchor_points=[(320, 140), (320, 340)],
+        image_size=(W, H),
+        candidate_labels=["cinnamon", "cinnamon"],
+    )
+    assert pred == 0, f"Distant duplicate text must be MULTIPLE; got Single (D_Score={score:.4f})"
+
+
 def test_synonym_same_mask_distant_anchors_is_single(evaluator):
     """
     Synonymous labels for one macro-object should be absorbed even if
