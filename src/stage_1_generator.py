@@ -15,20 +15,22 @@ class Stage1Generator:
             bnb_4bit_compute_dtype=torch.bfloat16
         )
 
-        self.processor = AutoProcessor.from_pretrained(model_id)
+        # --- THE FIX: ADD TRUST_REMOTE_CODE HERE ---
+        self.processor = AutoProcessor.from_pretrained(
+            model_id,
+            trust_remote_code=True
+        )
         
-        # 1. LOAD WITH NATIVE EAGER MODE ON ISOLATED GPU
-        # Since SAM 3 is on cuda:0, Qwen gets cuda:1 all to itself.
-        # We have plenty of VRAM, so we don't need brittle SDPA hacks!
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
             model_id,
             quantization_config=bnb_config,
             device_map="cuda:1", 
-            attn_implementation="eager" 
+            attn_implementation="eager",
+            trust_remote_code=True  # <--- AND HERE
         )
         self.model.eval()
+        # -------------------------------------------
 
-        # Force native attention output at the config level
         self.model.config.output_attentions = True
 
         # ==========================================
@@ -47,7 +49,6 @@ class Stage1Generator:
             
         print(f"✅ Tapping clean Eager layer: {target_layer_name}")
 
-        # A standard hook (No monkey-patching required)
         self.captured_attentions = []
         def hook_fn(module, input, output):
             if isinstance(output, tuple) and len(output) > 1 and output[1] is not None:
@@ -99,11 +100,12 @@ class Stage1Generator:
         start_idx = image_indices[0].item()
         end_idx = image_indices[-1].item() + 1
 
-        # 3. Diverse Beam Search Generation
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=30,
+                custom_generate="transformers-community/group-beam-search", # <--- ADD THIS BACK
+                trust_remote_code=True,                                     # <--- ADD THIS BACK
                 num_beams=num_beams,
                 num_beam_groups=num_beams,         
                 diversity_penalty=diversity_penalty, 
