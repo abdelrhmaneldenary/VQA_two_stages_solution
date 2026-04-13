@@ -143,7 +143,7 @@ def main():
     saved_viz_count = 0
     
     # RUN THE FULL DATASET
-    test_subset = val_dataset 
+    test_subset = val_dataset[:100]
     
     for idx, item in enumerate(test_subset):
         img_path = item["resolved_image_path"]
