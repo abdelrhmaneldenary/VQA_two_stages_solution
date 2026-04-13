@@ -28,7 +28,7 @@ class Stage2Segmenter:
         return np.zeros((h, w), dtype=np.uint8)
 
     def _mask_from_generated(self, generated, inputs, image):
-        h, w = image.size[1], image.size[0]
+        w, h = image.size
 
         if hasattr(self.processor, "post_process_instance_segmentation"):
             try:
