@@ -339,9 +339,10 @@ def main():
             print(f"   -> 🧠 Stage 1 (Semantics): {candidate_words}")
             
             if bimodal_tuples:
-                sample_logit = bimodal_tuples[0][1]
-                print(f"   -> 🌉 Latent Bridge     : Logit Range [{sample_logit.min().item():.2f} to {sample_logit.max().item():.2f}]")
+                sample_point = bimodal_tuples[0][1]
+                print(f"   -> 🌉 Latent Bridge     : Point Anchor at (X: {sample_point[0]}, Y: {sample_point[1]})")
             
+
             valid_masks = [m for m in final_masks if np.any(m)]
             print(f"   -> 📐 Stage 2 (Geometry) : {len(valid_masks)}/{len(final_masks)} masks contain valid pixels.")
             
