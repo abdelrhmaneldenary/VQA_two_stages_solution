@@ -1,7 +1,11 @@
 import os
-import torch
-from transformers import AutoModel, AutoProcessor # Using AutoModel here
 import gc
+import torch
+import numpy as np
+from PIL import Image
+from transformers import AutoModel, AutoProcessor
+
+
 class Stage2Segmenter:
     def __init__(self, model_id):
         # 1. Force the Kaggle absolute path
@@ -15,83 +19,20 @@ class Stage2Segmenter:
             local_files_only=True if os.path.exists(model_id) else False
         )
         
-        # 3. Load Model using AutoModel instead of AutoModelForVision2Seq
+        # 3. Load Model natively
         self.model = AutoModel.from_pretrained(
             local_path,
             device_map="auto",
-            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32, 
+            dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
             trust_remote_code=True,
             local_files_only=True if os.path.exists(model_id) else False
         )
-        self.model.eval()       
+        self.model.eval()
 
     def _to_image(self, image_or_path):
         if isinstance(image_or_path, Image.Image):
             return image_or_path.convert("RGB")
         return Image.open(image_or_path).convert("RGB")
-
-    def _blank_mask(self, image):
-        w, h = image.size
-        return np.zeros((h, w), dtype=np.uint8)
-
-    def _mask_from_generated(self, generated, inputs, image):
-        w, h = image.size
-
-        if hasattr(self.processor, "post_process_instance_segmentation"):
-            try:
-                results = self.processor.post_process_instance_segmentation(
-                    generated,
-                    threshold=0.0,
-                    target_sizes=[(h, w)],
-                )[0]
-                masks = results.get("masks", [])
-                if len(masks) > 0:
-                    idx = int(torch.argmax(results["scores"]))
-                    return masks[idx].detach().cpu().numpy().astype(np.uint8), float(results["scores"][idx])
-            except Exception:
-                pass
-
-        if hasattr(generated, "pred_masks"):
-            try:
-                pred_masks = generated.pred_masks
-                if pred_masks is not None and pred_masks.numel() > 0:
-                    mask = pred_masks[0, 0]
-                    mask = (mask > 0).detach().cpu().numpy().astype(np.uint8)
-                    return mask, 1.0
-            except Exception:
-                pass
-
-        if hasattr(self.processor, "post_process_masks"):
-            try:
-                processed = self.processor.post_process_masks(generated, target_sizes=[(h, w)])
-                if processed and len(processed[0]) > 0:
-                    mask = processed[0][0]
-                    if torch.is_tensor(mask):
-                        mask = mask.detach().cpu().numpy()
-                    mask = (mask > 0).astype(np.uint8)
-                    return mask, 1.0
-            except Exception:
-                pass
-
-        try:
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-            if hasattr(self.processor, "post_process_instance_segmentation"):
-                results = self.processor.post_process_instance_segmentation(
-                    outputs,
-                    threshold=0.0,
-                    target_sizes=[(h, w)],
-                )[0]
-                masks = results.get("masks", [])
-                if len(masks) > 0:
-                    idx = int(torch.argmax(results["scores"]))
-                    return masks[idx].detach().cpu().numpy().astype(np.uint8), float(results["scores"][idx])
-        except Exception:
-            pass
-
-        return self._blank_mask(image), 0.0
-
-
 
     def generate_masks(self, image_or_path, labels):
         image = self._to_image(image_or_path)
@@ -120,19 +61,23 @@ class Stage2Segmenter:
                     # Fallback if custom weights use a tuple output
                     mask = (outputs[0] > 0.0).squeeze().cpu().numpy()
 
-                # Ensure mask is 2D (Height x Width)
+                # Ensure mask is exactly 2D (Height x Width)
                 if mask.ndim > 2:
                     mask = mask[0]
 
                 # SAM usually outputs IoU scores; default to 1.0 if not found
-                score = outputs.iou_scores.squeeze().cpu().numpy() if hasattr(outputs, "iou_scores") else 1.0
+                if hasattr(outputs, "iou_scores"):
+                    # Get the highest scoring mask score
+                    score = outputs.iou_scores.max().item() 
+                else:
+                    score = 1.0
 
                 masks.append(mask)
                 scores.append(score)
 
             except Exception as e:
                 print(f"⚠️ Stage 2 OOM/Error on label '{label}': {e}")
-                # Emit a blank mask to keep the pipeline moving
+                # Emit a blank boolean mask to keep the pipeline moving
                 blank_mask = np.zeros((image.height, image.width), dtype=bool)
                 masks.append(blank_mask)
                 scores.append(0.0)
