@@ -19,6 +19,7 @@ class Stage2Segmenter:
         self.model = AutoModel.from_pretrained(
             local_path,
             device_map="auto",
+            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32, 
             trust_remote_code=True,
             local_files_only=True if os.path.exists(model_id) else False
         )
