@@ -188,7 +188,7 @@ class TopologicalEvaluator:
         avg_sim = sum(sims) / len(sims)
         return 1.0 - avg_sim
 
-    def evaluate(self, masks, anchor_points=None, image_size=None, candidate_labels=None, predicted_skill="OBJECT"):
+    def evaluate(self, masks, anchor_points=None, image_size=None, candidate_labels=None, predicted_skill=None):
         if len(masks) < 2:
             return 1, 0.0
 
@@ -218,9 +218,9 @@ class TopologicalEvaluator:
 
         sorted_indices = np.argsort(areas)[::-1]
         kept_indices = []
-        skill = str(predicted_skill or "OBJECT").upper()
-        if skill not in {"TEXT", "OBJECT", "COLOR", "COUNT"}:
-            skill = "OBJECT"
+        skill = str(predicted_skill or "AUTO").upper()
+        if skill not in {"TEXT", "OBJECT", "COLOR", "COUNT", "AUTO"}:
+            skill = "AUTO"
 
         for i in sorted_indices:
             is_absorbed = False
@@ -261,7 +261,8 @@ class TopologicalEvaluator:
                         if sep > self.DUP_TEXT_ANCHOR_SEP_THRESHOLD:
                             continue
 
-                    if similarity < self.TEXT_ABSORB_SIM_THRESHOLD:
+                    allow_low_similarity_absorb = semantic_match and skill != "TEXT"
+                    if similarity < self.TEXT_ABSORB_SIM_THRESHOLD and not allow_low_similarity_absorb:
                         continue
 
                     if semantic_match or similarity >= self.TEXT_ABSORB_SIM_THRESHOLD:
@@ -270,7 +271,7 @@ class TopologicalEvaluator:
                     continue
 
                 # Rule 1: containment behavior controlled by predicted skill.
-                if skill == "OBJECT":
+                if skill in {"OBJECT", "AUTO"}:
                     is_absorbed = True
                     break
                 if skill == "TEXT":
