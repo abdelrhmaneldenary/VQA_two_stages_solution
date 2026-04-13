@@ -15,6 +15,15 @@ class QuestionSkill(str, Enum):
 
 class Stage1Generator:
     GENERIC_BANLIST = {"object", "target", "item", "picture"}
+    TEXT_PATTERNS = [
+        re.compile(p) for p in [
+            r"\btext\b", r"\blabel\b", r"\bwriting\b", r"\bword\b", r"\bwords\b",
+            r"\bbrand\b", r"\bname\b", r"\bread\b", r"\bsay\b", r"\bwritten\b",
+            r"\bletter\b", r"\bletters\b",
+        ]
+    ]
+    COLOR_PATTERNS = [re.compile(p) for p in [r"\bcolor\b", r"\bcolour\b", r"\bshade\b", r"\bhue\b"]]
+    COUNT_PATTERNS = [re.compile(p) for p in [r"\bhow many\b", r"\bnumber of\b", r"\bcount\b"]]
 
     def __init__(self, model_id="Qwen/Qwen2-VL-2B-Instruct"):
         print(f"🚀 Loading Stage 1 Semantic Engine: {model_id}")
@@ -138,21 +147,11 @@ class Stage1Generator:
         if not q:
             return QuestionSkill.OBJECT.value
 
-        text_patterns = [
-            r"\btext\b", r"\blabel\b", r"\bwriting\b", r"\bword\b", r"\bwords\b",
-            r"\bbrand\b", r"\bname\b", r"\bread\b", r"\bsay\b", r"\bwritten\b",
-            r"\bletter\b", r"\bletters\b",
-        ]
-        color_patterns = [r"\bcolor\b", r"\bcolour\b", r"\bshade\b", r"\bhue\b"]
-        count_patterns = [
-            r"\bhow many\b", r"\bnumber of\b", r"\bcount\b",
-        ]
-
-        if any(re.search(p, q) for p in count_patterns):
+        if any(p.search(q) for p in self.COUNT_PATTERNS):
             return QuestionSkill.COUNT.value
-        if any(re.search(p, q) for p in text_patterns):
+        if any(p.search(q) for p in self.TEXT_PATTERNS):
             return QuestionSkill.TEXT.value
-        if any(re.search(p, q) for p in color_patterns):
+        if any(p.search(q) for p in self.COLOR_PATTERNS):
             return QuestionSkill.COLOR.value
         return QuestionSkill.OBJECT.value
 

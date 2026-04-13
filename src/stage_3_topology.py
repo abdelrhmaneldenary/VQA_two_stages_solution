@@ -10,10 +10,10 @@ class TopologicalEvaluator:
     SEMANTIC_JACCARD_THRESHOLD = 0.55  # token overlap for alias-like phrases
     SEMANTIC_CONTAINMENT_THRESHOLD = 0.5  # "nokia phone" vs "mobile phone" style containment
     SEMANTIC_CHAR_SIM_THRESHOLD = 0.78  # high char-level similarity for near-duplicate strings
-    # Keep containment permissive to collapse part-to-whole fragments early.
-    ABSORB_MIN_IOM = 0.60  # rule-1 containment trigger
-    # IoU>=0.90 follows the strong dedup baseline used in high-performing pipelines.
-    SAME_MASK_IOU = 0.90  # rule-2 identical geometry gate
+    # Rule 1: containment-based absorption trigger (part-to-whole collapse).
+    ABSORB_MIN_IOM = 0.60
+    # Rule 2: identical-geometry gate using an IoU>=0.90 baseline.
+    SAME_MASK_IOU = 0.90
     TEXT_ABSORB_SIM_THRESHOLD = 0.70
     DUP_TEXT_ANCHOR_SEP_THRESHOLD = 0.15  # keep both if duplicate text is spatially far
     OBJECT_DAMPING_FACTOR = 0.5
@@ -230,9 +230,9 @@ class TopologicalEvaluator:
             return 1, 0.0
 
         # --- SOLID-PIXEL HIERARCHICAL GEOMETRY VETO ---
-        # Rule 1: Aggressive containment with skill-aware behavior.
-        # Rule 2: Identical-geometry semantic veto for OCR strings.
-        # Rule 3: Far-anchor duplicate-text tie-breaker.
+        # Rule 1: containments (IoM>=0.60) can absorb based on predicted skill.
+        # Rule 2: near-identical masks (IoU>=0.90) absorb only with semantic approval.
+        # Rule 3: same-text pairs with far anchors are kept as distinct instances.
         solid_masks = [self._fill_holes(m) for m in valid_masks]
         areas = [np.sum(m) for m in solid_masks]
 
