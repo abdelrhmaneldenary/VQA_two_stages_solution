@@ -1,21 +1,28 @@
-import numpy as np
+import os
 import torch
-from PIL import Image
-from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+from transformers import AutoModel, AutoProcessor # Using AutoModel here
 
 class Stage2Segmenter:
-    def __init__(self, model_id="facebook/sam3-h"):
-        print(f"🚀 Loading Stage 2 (SAM 3): {model_id}")
-        self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-
-        dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-        self.model = AutoModelForVision2Seq.from_pretrained(
-            model_id,
-            torch_dtype=dtype,
+    def __init__(self, model_id):
+        # 1. Force the Kaggle absolute path
+        local_path = os.path.abspath(model_id) if os.path.exists(model_id) else model_id
+        print(f"🚀 Loading Stage 2 (SAM 3): {local_path}")
+        
+        # 2. Load Processor safely
+        self.processor = AutoProcessor.from_pretrained(
+            local_path,
+            trust_remote_code=True,
+            local_files_only=True if os.path.exists(model_id) else False
+        )
+        
+        # 3. Load Model using AutoModel instead of AutoModelForVision2Seq
+        self.model = AutoModel.from_pretrained(
+            local_path,
             device_map="auto",
             trust_remote_code=True,
+            local_files_only=True if os.path.exists(model_id) else False
         )
-        self.model.eval()
+        self.model.eval()       
 
     def _to_image(self, image_or_path):
         if isinstance(image_or_path, Image.Image):
