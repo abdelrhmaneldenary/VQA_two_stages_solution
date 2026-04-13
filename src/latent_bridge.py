@@ -1,8 +1,13 @@
 import torch
 import torch.nn.functional as F
 import spacy
+from difflib import SequenceMatcher
 
 class LatentBridge:
+    SEMANTIC_JACCARD_THRESHOLD = 0.6
+    SEMANTIC_CONTAINMENT_THRESHOLD = 0.8
+    SEMANTIC_SEQUENCE_THRESHOLD = 0.9
+
     def __init__(self, logit_scale_factor=1.0, sam3_prompt_size=(256, 256)):
         print("🚀 Initializing Latent Bridge & SpaCy POS Tagger...")
         try:
@@ -13,6 +18,72 @@ class LatentBridge:
         self.logit_scale_factor = logit_scale_factor
         self.sam3_prompt_size = sam3_prompt_size
         self.valid_pos = {"NOUN", "PROPN", "ADJ", "VERB"}
+
+    def _normalize_phrase(self, text):
+        if text is None:
+            return ""
+        return " ".join(str(text).strip().lower().split())
+
+    def _semantic_signature(self, text):
+        doc = self.nlp(str(text))
+        lemmas = []
+        head_nouns = []
+        for token in doc:
+            if token.is_punct or token.is_space:
+                continue
+            lemma = token.lemma_.lower().strip()
+            if not lemma:
+                continue
+            if token.pos_ in {"NOUN", "PROPN", "ADJ"}:
+                lemmas.append(lemma)
+            if token.pos_ in {"NOUN", "PROPN"}:
+                head_nouns.append(lemma)
+        if not lemmas:
+            lemmas = [self._normalize_phrase(text)]
+        return set(lemmas), set(head_nouns)
+
+    def _are_semantic_duplicates(self, text_a, text_b):
+        norm_a = self._normalize_phrase(text_a)
+        norm_b = self._normalize_phrase(text_b)
+        if not norm_a or not norm_b:
+            return False
+        if norm_a == norm_b:
+            return True
+
+        tokens_a, heads_a = self._semantic_signature(norm_a)
+        tokens_b, heads_b = self._semantic_signature(norm_b)
+        if not tokens_a or not tokens_b:
+            return False
+
+        shared_heads = heads_a.intersection(heads_b)
+        intersection = tokens_a.intersection(tokens_b)
+        jaccard = len(intersection) / len(tokens_a.union(tokens_b))
+        containment = min(len(intersection) / len(tokens_a), len(intersection) / len(tokens_b))
+        seq_ratio = SequenceMatcher(None, norm_a, norm_b).ratio()
+        has_lexical_overlap = jaccard >= self.SEMANTIC_JACCARD_THRESHOLD or containment >= self.SEMANTIC_CONTAINMENT_THRESHOLD
+        is_string_similar = seq_ratio >= self.SEMANTIC_SEQUENCE_THRESHOLD
+
+        # Conservative merge rule:
+        # Require lexical overlap + shared noun head (or near-identical string)
+        return shared_heads and (has_lexical_overlap or is_string_similar)
+
+    def _semantic_deduplicate_candidates(self, candidates_data):
+        deduped = []
+        for item in candidates_data:
+            if isinstance(item, tuple) and len(item) == 2:
+                text, seq_idx = item
+            else:
+                text, seq_idx = item, 0
+
+            is_duplicate = False
+            for kept_text, _ in deduped:
+                if self._are_semantic_duplicates(text, kept_text):
+                    is_duplicate = True
+                    break
+
+            if not is_duplicate:
+                deduped.append((str(text), seq_idx))
+        return deduped
 
     def _probability_to_logits(self, prob_matrix, epsilon=1e-5):
         prob_matrix = prob_matrix.to(torch.float32)
@@ -59,6 +130,11 @@ class LatentBridge:
             raise ValueError(f"❌ Latent Bridge received unrecognized output type: {type(outputs)}")
             
         orig_w, orig_h = raw_image_size
+
+        # Deduplicate semantically equivalent labels before generating anchors.
+        # This prevents synonym pairs (e.g., "Nokia phone" / "mobile phone")
+        # from becoming artificially separated peaks.
+        candidates_data = self._semantic_deduplicate_candidates(candidates_data)
         
         for item in candidates_data:
             if isinstance(item, tuple) and len(item) == 2:

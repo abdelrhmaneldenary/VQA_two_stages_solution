@@ -194,9 +194,15 @@ def main():
 
             # Extract anchor points from bimodal_tuples for anchor-aware Stage 3
             anchor_points = [pt for _, pt in bimodal_tuples]
+            candidate_labels = [txt for txt, _ in bimodal_tuples]
 
             # 4. Topology Evaluation (CPU Bound)
-            prediction, d_score = stage3.evaluate(final_masks, anchor_points=anchor_points, image_size=(raw_w, raw_h))
+            prediction, d_score = stage3.evaluate(
+                final_masks,
+                anchor_points=anchor_points,
+                image_size=(raw_w, raw_h),
+                candidate_labels=candidate_labels,
+            )
             ground_truth = 1 if item.get("binary_label") == "single" else 0
             
             y_pred.append(prediction)

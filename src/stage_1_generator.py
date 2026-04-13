@@ -3,8 +3,11 @@ import torch.nn as nn
 from transformers import AutoProcessor, Qwen2VLForConditionalGeneration, BitsAndBytesConfig
 from qwen_vl_utils import process_vision_info
 import ast
+import re
 
 class Stage1Generator:
+    GENERIC_BANLIST = {"object", "target", "item", "picture"}
+
     def __init__(self, model_id="Qwen/Qwen2-VL-2B-Instruct"):
         print(f"🚀 Loading Stage 1 Semantic Engine: {model_id}")
         
@@ -57,6 +60,70 @@ class Stage1Generator:
 
         self.hook = target_layer_module.register_forward_hook(hook_fn)
         # ==========================================
+
+    def _parse_candidate_strings(self, decoded_text):
+        """
+        Robustly extract candidate noun phrases from model output without naive
+        comma splitting (which breaks malformed JSON-like strings).
+        """
+        if not decoded_text:
+            return []
+
+        candidates = []
+
+        # 1) Strict Python-list parse path
+        try:
+            parsed_list = ast.literal_eval(decoded_text)
+            if isinstance(parsed_list, list):
+                for item in parsed_list:
+                    if isinstance(item, str):
+                        clean = item.strip()
+                        if clean and clean.lower() not in self.GENERIC_BANLIST:
+                            candidates.append(clean)
+                if candidates:
+                    return candidates
+        except Exception:
+            pass
+
+        # 2) Key:value JSON-like text extraction (handles malformed braces safely).
+        # 'object' can appear as a structural key in malformed outputs, while
+        # generic values like "object" are still filtered by GENERIC_BANLIST.
+        kv_text_hits = re.findall(
+            r"""(?i)["']?(?:text|label|object|name|noun)["']?\s*:\s*["']([^"']+)["']""",
+            decoded_text,
+        )
+        for hit in kv_text_hits:
+            clean = hit.strip()
+            if clean and clean.lower() not in self.GENERIC_BANLIST:
+                candidates.append(clean)
+        if candidates:
+            return candidates
+
+        # 3) Quoted phrase extraction fallback
+        quoted_hits = re.findall(r"""["']([^"']{1,80})["']""", decoded_text)
+        for hit in quoted_hits:
+            clean = hit.strip()
+            if clean and clean.lower() not in self.GENERIC_BANLIST and not clean.isdigit():
+                candidates.append(clean)
+        if candidates:
+            return candidates
+
+        # 4) Conversational noun-phrase fallback (no comma-based list assumptions)
+        raw = decoded_text.strip().strip("[]{}()")
+        raw = re.sub(r"(?i)\b(?:answer|answers|output|objects?)\s*:\s*", "", raw)
+        chunks = re.split(r"[\n;|/]|\b(?:and|or|then)\b", raw, flags=re.IGNORECASE)
+        for chunk in chunks:
+            clean = chunk.strip(" -:,.\"'")
+            clean = re.sub(r"(?i)^(?:a|an|the)\s+", "", clean).strip()
+            if not clean:
+                continue
+            if not re.search(r"[a-zA-Z]", clean):
+                continue
+            if clean.lower() in self.GENERIC_BANLIST:
+                continue
+            candidates.append(clean)
+
+        return candidates
 
     def generate_candidates(self, image_path, question, context_string, num_beams=4, diversity_penalty=0.5):
         """
@@ -137,23 +204,10 @@ class Stage1Generator:
         for seq_idx in range(num_beams):
             generated_ids = outputs.sequences[seq_idx][len(inputs["input_ids"][0]):]
             decoded_text = self.processor.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
-            
-            try:
-                parsed_list = ast.literal_eval(decoded_text)
-                if isinstance(parsed_list, list):
-                    for item in parsed_list:
-                        if item.lower() not in ["object", "target", "item", "picture"]:
-                            candidates_data.append((item.strip(), seq_idx))
-                    continue 
-            except:
-                pass 
-                
-            clean_text = decoded_text.replace("[", "").replace("]", "").replace("'", "").replace('"', "")
-            manual_items = [c.strip() for c in clean_text.split(",") if c.strip()]
-            
-            for item in manual_items:
-                if item.lower() not in ["object", "target", "item", "picture"]:
-                    candidates_data.append((item, seq_idx))
+
+            extracted_items = self._parse_candidate_strings(decoded_text)
+            for item in extracted_items:
+                candidates_data.append((item, seq_idx))
 
         del inputs
         torch.cuda.empty_cache()
