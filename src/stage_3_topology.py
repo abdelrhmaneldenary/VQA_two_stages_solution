@@ -5,15 +5,18 @@ import math
 from difflib import SequenceMatcher
 
 class TopologicalEvaluator:
+    """Skill-aware topology evaluator using a simple 3-rule IoU/IoM hierarchy."""
     LABEL_STOPWORDS = {"a", "an", "the", "of", "on", "in", "for", "with", "and", "at", "by", "to", "from", "or", "but", "as", "if"}
     SEMANTIC_JACCARD_THRESHOLD = 0.55  # token overlap for alias-like phrases
     SEMANTIC_CONTAINMENT_THRESHOLD = 0.5  # "nokia phone" vs "mobile phone" style containment
     SEMANTIC_CHAR_SIM_THRESHOLD = 0.78  # high char-level similarity for near-duplicate strings
-    ABSORB_MIN_IOM = 0.85  # minimum mask overlap before any absorption is considered
-    SAME_MASK_IOU = 0.98  # near-identical geometry gate
-    STRONG_CONTAINMENT_IOM = 0.98  # near-complete parent-child containment gate
-    STRONG_CONTAINMENT_AREA_RATIO = 0.6  # child must be meaningfully smaller than parent
+    # Rule 1: containment-based absorption trigger (part-to-whole collapse).
+    ABSORB_MIN_IOM = 0.60
+    # Rule 2: identical-geometry gate using an IoU>=0.90 baseline.
+    SAME_MASK_IOU = 0.90
+    TEXT_ABSORB_SIM_THRESHOLD = 0.70
     DUP_TEXT_ANCHOR_SEP_THRESHOLD = 0.15  # keep both if duplicate text is spatially far
+    OBJECT_DAMPING_FACTOR = 0.5
 
     def __init__(self, w1_ciou=0.4, w2_conflict=0.6, w3_anchor=0.5, w3_semantic=None, threshold=0.045):
         print("🚀 Initializing VizWiz Geometry+Semantic Topological Evaluator...")
@@ -175,6 +178,22 @@ class TopologicalEvaluator:
         conflict_ratio = (global_hull_area - actual_mask_area) / global_hull_area
         return max(0.0, min(1.0, conflict_ratio))
 
+    def _should_absorb_identical_geometry(self, skill, same_label_text, similarity, semantic_match, anchor_sep):
+        if same_label_text and anchor_sep > self.DUP_TEXT_ANCHOR_SEP_THRESHOLD:
+            return False
+        if similarity >= self.TEXT_ABSORB_SIM_THRESHOLD:
+            return True
+        if skill == "TEXT":
+            return False
+        return semantic_match
+
+    def _should_absorb_containment(self, skill, similarity, semantic_match):
+        if skill in {"OBJECT", "AUTO"}:
+            return True
+        if skill == "TEXT":
+            return semantic_match or similarity >= self.TEXT_ABSORB_SIM_THRESHOLD
+        return semantic_match
+
     def _calculate_semantic_divergence(self, labels):
         if labels is None or len(labels) < 2:
             return 0.0
@@ -189,7 +208,7 @@ class TopologicalEvaluator:
         avg_sim = sum(sims) / len(sims)
         return 1.0 - avg_sim
 
-    def evaluate(self, masks, anchor_points=None, image_size=None, candidate_labels=None):
+    def evaluate(self, masks, anchor_points=None, image_size=None, candidate_labels=None, predicted_skill=None):
         if len(masks) < 2:
             return 1, 0.0
 
@@ -210,16 +229,18 @@ class TopologicalEvaluator:
         if len(valid_masks) < 2:
             return 1, 0.0
 
-        # --- SOLID-PIXEL GEOMETRY+SEMANTIC NMS ---
-        # Fill internal holes so that parent objects (e.g. couch) absorb their
-        # children (e.g. pillow) correctly.
-        # If two masks are almost identical, absorb only when labels are lexically
-        # equivalent; otherwise keep both so OCR-like distinct strings survive.
+        # --- SOLID-PIXEL HIERARCHICAL GEOMETRY VETO ---
+        # Rule 1: containments (IoM>=0.60) can absorb based on predicted skill.
+        # Rule 2: near-identical masks (IoU>=0.90) absorb only with semantic approval.
+        # Rule 3: same-text pairs with far anchors are kept as distinct instances.
         solid_masks = [self._fill_holes(m) for m in valid_masks]
         areas = [np.sum(m) for m in solid_masks]
 
         sorted_indices = np.argsort(areas)[::-1]
         kept_indices = []
+        skill = str(predicted_skill or "AUTO").upper()
+        if skill not in {"TEXT", "OBJECT", "COLOR", "COUNT", "AUTO"}:
+            skill = "AUTO"
 
         for i in sorted_indices:
             is_absorbed = False
@@ -236,12 +257,11 @@ class TopologicalEvaluator:
                     continue
 
                 iou = self._calculate_pixel_iou(mask_parent, mask_child)
-                area_parent = areas[j]
-                area_child = areas[i]
-                area_ratio = min(area_parent, area_child) / max(area_parent, area_child)
                 same_shape = iou >= self.SAME_MASK_IOU
-                strong_containment = (
-                    iom >= self.STRONG_CONTAINMENT_IOM and area_ratio <= self.STRONG_CONTAINMENT_AREA_RATIO
+                similarity = (
+                    self._semantic_similarity(valid_labels[i], valid_labels[j])
+                    if valid_labels is not None
+                    else 1.0
                 )
                 semantic_match = (
                     self._are_semantically_equivalent(valid_labels[i], valid_labels[j])
@@ -253,23 +273,33 @@ class TopologicalEvaluator:
                     and self._normalize_label(valid_labels[i]) == self._normalize_label(valid_labels[j])
                 )
 
-                # Part-to-whole should always absorb when containment is near-complete.
-                if strong_containment:
-                    is_absorbed = True
-                    break
-
-                # Near-identical geometry: absorb only when labels are equivalent.
+                # Rule 2 + Rule 3: identical geometry requires semantic approval,
+                # and far duplicate anchors must stay separate.
                 if same_shape:
-                    # Duplicate text on distant anchors (same string printed twice) should survive.
-                    if same_label_text and valid_anchors is not None:
-                        sep = self._pair_anchor_distance(valid_anchors[i], valid_anchors[j], image_size)
-                        if sep > self.DUP_TEXT_ANCHOR_SEP_THRESHOLD:
-                            continue
-
-                    if semantic_match:
+                    sep = (
+                        self._pair_anchor_distance(valid_anchors[i], valid_anchors[j], image_size)
+                        if valid_anchors is not None
+                        else 0.0
+                    )
+                    if self._should_absorb_identical_geometry(
+                        skill=skill,
+                        same_label_text=same_label_text,
+                        similarity=similarity,
+                        semantic_match=semantic_match,
+                        anchor_sep=sep,
+                    ):
                         is_absorbed = True
                         break
                     continue
+
+                # Rule 1: containment behavior controlled by predicted skill.
+                if self._should_absorb_containment(
+                    skill=skill,
+                    similarity=similarity,
+                    semantic_match=semantic_match,
+                ):
+                    is_absorbed = True
+                    break
 
             if not is_absorbed:
                 kept_indices.append(i)
@@ -317,6 +347,8 @@ class TopologicalEvaluator:
             + (self.W2 * conflict_ratio)
             + (self.W3 * tie_breaker_divergence)
         )
+        if skill == "OBJECT":
+            d_score *= self.OBJECT_DAMPING_FACTOR
 
         classification = 0 if d_score >= self.threshold else 1
         return classification, d_score

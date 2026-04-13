@@ -4,9 +4,26 @@ from transformers import AutoProcessor, Qwen2VLForConditionalGeneration, BitsAnd
 from qwen_vl_utils import process_vision_info
 import ast
 import re
+from enum import Enum
+
+
+class QuestionSkill(str, Enum):
+    TEXT = "TEXT"
+    OBJECT = "OBJECT"
+    COLOR = "COLOR"
+    COUNT = "COUNT"
 
 class Stage1Generator:
     GENERIC_BANLIST = {"object", "target", "item", "picture"}
+    TEXT_PATTERNS = [
+        re.compile(p) for p in [
+            r"\btext\b", r"\blabel\b", r"\bwriting\b", r"\bword\b", r"\bwords\b",
+            r"\bbrand\b", r"\bname\b", r"\bread\b", r"\bsay\b", r"\bwritten\b",
+            r"\bletter\b", r"\bletters\b",
+        ]
+    ]
+    COLOR_PATTERNS = [re.compile(p) for p in [r"\bcolor\b", r"\bcolour\b", r"\bshade\b", r"\bhue\b"]]
+    COUNT_PATTERNS = [re.compile(p) for p in [r"\bhow many\b", r"\bnumber of\b", r"\bcount\b"]]
 
     def __init__(self, model_id="Qwen/Qwen2-VL-2B-Instruct"):
         print(f"🚀 Loading Stage 1 Semantic Engine: {model_id}")
@@ -125,16 +142,42 @@ class Stage1Generator:
 
         return candidates
 
+    def _classify_question_skill(self, question):
+        q = (question or "").strip().lower()
+        if not q:
+            return QuestionSkill.OBJECT.value
+
+        if any(p.search(q) for p in self.COUNT_PATTERNS):
+            return QuestionSkill.COUNT.value
+        if any(p.search(q) for p in self.TEXT_PATTERNS):
+            return QuestionSkill.TEXT.value
+        if any(p.search(q) for p in self.COLOR_PATTERNS):
+            return QuestionSkill.COLOR.value
+        return QuestionSkill.OBJECT.value
+
+    def _build_skill_bias_instruction(self, skill):
+        if skill == QuestionSkill.TEXT.value:
+            return "Skill-Bias(TEXT): Focus strictly on distinct textual labels. Do not group or merge different strings."
+        if skill == QuestionSkill.OBJECT.value:
+            return "Skill-Bias(OBJECT): Focus on macro-objects. Ignore sub-parts like buttons, screens, handles, and components. List only the parent entity."
+        if skill == QuestionSkill.COLOR.value:
+            return "Skill-Bias(COLOR): Focus on the object whose color is being asked about; avoid part-level mentions unless the part itself is the queried object."
+        return "Skill-Bias(COUNT): Focus on distinct countable entities at object level; avoid splitting one physical object into parts."
+
     def generate_candidates(self, image_path, question, context_string, num_beams=4, diversity_penalty=0.5):
         """
         Executes Diverse Beam Search and extracts semantic candidates.
         Includes an aggressive parser to prevent '0/1' geometric failures.
         """
         self.captured_attentions = []
+        predicted_skill = self._classify_question_skill(question)
+        skill_instruction = self._build_skill_bias_instruction(predicted_skill)
 
 
         prompt_text = (
             f"{context_string}\n"
+            f"System Skill Token: {predicted_skill}\n"
+            f"{skill_instruction}\n"
             f"Task: You are simulating a diverse crowd of human annotators. Answer the question by listing the distinct, concrete, physical objects visible in the image.\n"
             f"Rules:\n"
             f"1. NO DENSE CAPTIONING: Name the macro-object. Never list the component parts of a single item (e.g., output 'laptop', never 'screen' and 'keyboard'). EXCEPTION: If the question asks about TEXT, LABELS, WRITING, BRANDS, or WORDS on an object, output each distinct, spatially-separate text string or label as its own list entry.\n"
@@ -212,4 +255,4 @@ class Stage1Generator:
         del inputs
         torch.cuda.empty_cache()
         
-        return candidates_data, final_bridge_attentions, start_idx, end_idx, grid_h, grid_w
+        return candidates_data, final_bridge_attentions, start_idx, end_idx, grid_h, grid_w, predicted_skill
