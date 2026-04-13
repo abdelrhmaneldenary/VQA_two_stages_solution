@@ -84,7 +84,7 @@ class LatentBridge:
             # We apply average pooling to dilute isolated spikes and 
             # force the argmax to find the dense "center of mass".
             smoothed_attn = F.avg_pool2d(
-                attn_grid_2d.unsqueeze(0).unsqueeze(0).to(torch.float32), 
+                attn_grid_2d.to(torch.float32), 
                 kernel_size=3, 
                 stride=1, 
                 padding=1
