@@ -25,6 +25,7 @@ class Stage1Generator:
             quantization_config=bnb_config,
             device_map="cuda:1", 
             attn_implementation="eager",
+            low_cpu_mem_usage=True, # Added to optimize RAM during weight loading
             trust_remote_code=True  
         )
         self.model.eval()
@@ -43,7 +44,6 @@ class Stage1Generator:
             raise AttributeError("❌ Could not dynamically find any 'self_attn' layers!")
             
         # Target an upper-middle layer (75% depth) instead of the final text-generation layer.
-        # This guarantees we capture crisp spatial reasoning before it diffuses into pure semantics.
         target_idx = int(len(attn_modules) * 0.5)
         target_layer_name, target_layer_module = attn_modules[target_idx]
             
@@ -52,6 +52,7 @@ class Stage1Generator:
         self.captured_attentions = []
         def hook_fn(module, input, output):
             if isinstance(output, tuple) and len(output) > 1 and output[1] is not None:
+                # Detach and move to CPU immediately to prevent VRAM accumulation
                 self.captured_attentions.append(output[1].detach().cpu())
 
         self.hook = target_layer_module.register_forward_hook(hook_fn)
@@ -84,7 +85,7 @@ class Stage1Generator:
         messages = [{
             "role": "user",
             "content": [
-                {"type": "image", "image": image_path, "max_pixels": 313600},
+                {"type": "image", "image": image_path, "max_pixels": 200704}, # Capped pixels for memory safety
                 {"type": "text", "text": prompt_text}
             ]
         }]
@@ -126,6 +127,12 @@ class Stage1Generator:
             raise ValueError("❌ Hook failed to capture attention. Ensure eager mode is active.")
         
         final_bridge_attentions = [(self.captured_attentions[-1],)]
+
+        # --- AGGRESSIVE VRAM/RAM CLEANUP ---
+        # Beam search creates dozens of attention tensors. We only need the last one. 
+        # Delete the rest instantly to avoid memory fragmentation.
+        self.captured_attentions.clear() 
+        # -----------------------------------
 
         candidates_data = [] 
         

@@ -149,26 +149,39 @@ def main():
         print(f"\n[IMAGE {idx+1}/{len(test_subset)}] Question: {item['question']}")
         
         try:
+            # --- STAGE 1: SEMANTIC ANCHORING ---
+            # Ensure SAM is not hogging VRAM while Qwen runs
+            if hasattr(stage2, 'model'):
+                stage2.model.to("cpu")
+            torch.cuda.empty_cache()
+            gc.collect()
+
             raw_w, raw_h = Image.open(img_path).size
             
-            # 1. Semantics
+            # 1. Semantics (Qwen) - Now running on GPU
+            stage1.model.to("cuda:0") # Or cuda:1 depending on your setup
             candidates, qwen_outputs, start_idx, end_idx, grid_h, grid_w = stage1.generate_candidates(
                 img_path, item["question"], few_shot_context, num_beams=CONFIG["num_beams"], diversity_penalty=CONFIG["lambda_penalty"]
             )
             
-            # 2. Latent Bridge
+            # 2. Latent Bridge (Math-heavy, keep on CPU or GPU)
             bimodal_tuples = bridge.process_bimodal_tuples(
                 candidates, qwen_outputs, start_idx, end_idx, grid_h, grid_w, (raw_w, raw_h)
             )
 
+            # --- THE HANDOFF SHIELD ---
+            # Kill Qwen memory before SAM starts
             del qwen_outputs
+            stage1.model.to("cpu")
             torch.cuda.empty_cache()
             gc.collect()
 
-            # 3. Geometry
+            # --- STAGE 2: GEOMETRIC SEGMENTATION ---
+            # 3. Geometry (SAM 3) - Move to GPU now
+            stage2.model.to("cuda:0") 
             final_masks, _ = stage2.generate_masks(img_path, bimodal_tuples)
             
-            # 4. Topology Evaluation
+            # 4. Topology Evaluation (CPU Bound)
             prediction, d_score = stage3.evaluate(final_masks)
             ground_truth = 1 if item.get("binary_label") == "single" else 0
             
@@ -177,7 +190,7 @@ def main():
             sources.append(item.get("source", "Unknown"))
             y_scores.append(1.0 - d_score)
             
-            # Logging
+            # Logging and Viz
             pred_text = "Single" if prediction == 1 else "Multiple"
             true_text = "Single" if ground_truth == 1 else "Multiple"
             valid_masks = [m for m in final_masks if np.any(m)]
@@ -186,10 +199,14 @@ def main():
             print(f"   -> 📐 Geometry : {len(valid_masks)}/{len(final_masks)} valid masks generated.")
             print(f"   -> ⚖️ Topology : D_Score: {d_score:.3f} | Pred: {pred_text} | True: {true_text}")
 
-            # Save Top 100 Divergence Proofs for Thesis
             if d_score > 0.4 and saved_viz_count < 100:
                 save_topology_visualization(img_path, final_masks, d_score, CONFIG["run_id"], idx, artifact_dir)
                 saved_viz_count += 1
+                
+            # Final cleanup for next image
+            stage2.model.to("cpu")
+            torch.cuda.empty_cache()
+            gc.collect()
 
         except Exception as e:
             print(f"  -> ❌ Pipeline failed: {str(e)}")
