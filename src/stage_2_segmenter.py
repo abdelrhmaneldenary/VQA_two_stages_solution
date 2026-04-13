@@ -1,5 +1,7 @@
 import os
 import torch
+import numpy as np
+from PIL import Image
 from transformers import AutoModel, AutoProcessor # Using AutoModel here
 
 class Stage2Segmenter:
@@ -19,11 +21,16 @@ class Stage2Segmenter:
         self.model = AutoModel.from_pretrained(
             local_path,
             device_map="auto",
-            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32, 
+            dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
             trust_remote_code=True,
             local_files_only=True if os.path.exists(model_id) else False
         )
-        self.model.eval()       
+        self.model.eval()
+        if getattr(self.model, "generation_config", None) is not None:
+            self.model.generation_config.do_sample = False
+            for attr in ("temperature", "top_p", "top_k"):
+                if hasattr(self.model.generation_config, attr):
+                    setattr(self.model.generation_config, attr, None)
 
     def _to_image(self, image_or_path):
         if isinstance(image_or_path, Image.Image):
@@ -33,6 +40,11 @@ class Stage2Segmenter:
     def _blank_mask(self, image):
         w, h = image.size
         return np.zeros((h, w), dtype=np.uint8)
+
+    def _oom_result(self, image):
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return self._blank_mask(image), 0.0
 
     def _mask_from_generated(self, generated, inputs, image):
         w, h = image.size
@@ -100,8 +112,19 @@ class Stage2Segmenter:
             inputs = self.processor(text=label, images=image, return_tensors="pt")
             inputs = {k: v.to(self.model.device) if torch.is_tensor(v) else v for k, v in inputs.items()}
 
-            with torch.no_grad():
-                generated = self.model.generate(**inputs, max_new_tokens=16)
+            try:
+                with torch.no_grad():
+                    generated = self.model.generate(
+                        **inputs,
+                        max_new_tokens=16,
+                    )
+            except (torch.cuda.OutOfMemoryError, RuntimeError) as err:
+                if isinstance(err, RuntimeError) and "out of memory" not in str(err).lower():
+                    raise
+                mask, score = self._oom_result(image)
+                masks.append(mask)
+                scores.append(score)
+                continue
 
             mask, score = self._mask_from_generated(generated, inputs, image)
             masks.append(mask)
