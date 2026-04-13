@@ -9,7 +9,7 @@ LOG_FILE_PATH = "experiment_tracker.csv"
 
 # 3. Master Configuration Dictionary
 CONFIG = {
-    "run_id": "EXP_002_POINT_ANCHORS", # Updated run ID to track our new architecture
+    "run_id": "EXP_003", # 
     "notes": "Epistemic Point Anchor Pivot - Native SAM 3 Handshake",
     
     # Stage 1 Parameters

@@ -159,7 +159,7 @@ class Stage1Generator:
         if skill == QuestionSkill.TEXT.value:
             return "Skill-Bias(TEXT): Focus strictly on distinct textual labels. Do not group or merge different strings."
         if skill == QuestionSkill.OBJECT.value:
-            return "Skill-Bias(OBJECT): Focus on macro-objects. Ignore sub-parts like buttons, screens, handles, and components. List only the parent entity."
+            return "Skill-Bias(OBJECT): Focus on macro-objects. Ignore sub-parts like buttons, screens, handles, and components. List only the parent entity.Limit your analysis to the top 3 most prominent physical entities. If the scene is a single object, list only that object."
         if skill == QuestionSkill.COLOR.value:
             return "Skill-Bias(COLOR): Focus on the object whose color is being asked about; avoid part-level mentions unless the part itself is the queried object."
         return "Skill-Bias(COUNT): Focus on distinct countable entities at object level; avoid splitting one physical object into parts."
@@ -218,7 +218,7 @@ class Stage1Generator:
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=30,
+                max_new_tokens=10,
                 custom_generate="transformers-community/group-beam-search", 
                 trust_remote_code=True,                                     
                 num_beams=num_beams,
@@ -254,5 +254,9 @@ class Stage1Generator:
 
         del inputs
         torch.cuda.empty_cache()
+
+        # The "Triple-Constraint" Hard Cap
+        if predicted_skill in ['OBJECT', 'COLOR', 'STATE']:
+            candidates_data = candidates_data[:3]
         
         return candidates_data, final_bridge_attentions, start_idx, end_idx, grid_h, grid_w, predicted_skill
