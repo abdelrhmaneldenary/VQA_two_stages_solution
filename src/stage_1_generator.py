@@ -65,17 +65,18 @@ class Stage1Generator:
         """
         self.captured_attentions = []
 
+
         # ==========================================
-        # 🎯 THE MACRO-LEVEL PROMPT ENGINEERING
+        # 🎯 THE BALANCED MACRO-PHYSICAL PROMPT
         # ==========================================
         prompt_text = (
-            f"{context_string}\n" # <--- Few-shot examples are injected right here
-            f"Task: Answer the question by listing the distinct, concrete, physical objects visible in the image.\n"
+            f"{context_string}\n"
+            f"Task: You are simulating a diverse crowd of human annotators. Answer the question by listing the distinct, concrete, physical objects visible in the image.\n"
             f"Rules:\n"
-            f"1. NO DENSE CAPTIONING: Never break a single contiguous object into its component parts (e.g., if it's a laptop, output 'laptop', do NOT output 'screen', 'keyboard').\n"
-            f"2. GROUP FUNCTIONAL UNITS: If items sit in the exact same location and form one unit (e.g., 'couch' and 'pillows'), output only the macro-name ('couch').\n"
-            f"3. PRESERVE DISTINCT SEPARATION: If there are spatially separate, physically distinct objects (e.g., two cars parked next to each other, or three separate people), you MUST list each one individually.\n"
-            f"4. NEVER use generic words ('object', 'item', 'picture').\n"
+            f"1. NO DENSE CAPTIONING: Name the macro-object. Never list the component parts of a single item (e.g., output 'laptop', never 'screen' and 'keyboard').\n"
+            f"2. PHYSICAL NOUNS ONLY: Only output tangible, physical items. Never use generic words ('object', 'item', 'picture').\n"
+            f"3. PRESERVE DISTINCT SEPARATION: If there are multiple spatially separate, distinct objects that answer the question (e.g., a 'laptop' and a 'coffee cup', or two separate 'cars'), you MUST list each one individually.\n"
+            f"4. DIVERSITY: If humans might disagree on which specific object or text answers the question, list all plausible distinct objects.\n"
             f"5. Output ONLY a Python bracketed list of string noun phrases.\n\n"
             f"Target Image Analysis:\n"
             f"Question: '{question}'\n"
