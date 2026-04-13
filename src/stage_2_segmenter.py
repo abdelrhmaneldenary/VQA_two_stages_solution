@@ -20,13 +20,13 @@ class Stage2Segmenter:
         
         # 3. Load Model with EAGER ATTENTION to bypass the SDPA crash
         self.model = AutoModelForMaskGeneration.from_pretrained(
-            local_path,
-            device_map="auto",
-            dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-            attn_implementation="eager", # <--- THE MAGIC FIX
-            trust_remote_code=True,
-            local_files_only=True if os.path.exists(model_id) else False
-        )
+                    local_path,
+                    device_map="cuda:0", # <--- CHANGE THIS FROM "auto"
+                    dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                    attn_implementation="eager",
+                    trust_remote_code=True,
+                    local_files_only=True if os.path.exists(model_id) else False
+                )
         self.model.eval()
 
     def _to_image(self, image_or_path):
