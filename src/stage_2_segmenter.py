@@ -3,8 +3,7 @@ import gc
 import torch
 import numpy as np
 from PIL import Image
-from transformers import AutoModel, AutoProcessor
-
+from transformers import AutoModelForMaskGeneration, AutoProcessor
 
 class Stage2Segmenter:
     def __init__(self, model_id):
@@ -19,8 +18,8 @@ class Stage2Segmenter:
             local_files_only=True if os.path.exists(model_id) else False
         )
         
-        # 3. Load Model natively
-        self.model = AutoModel.from_pretrained(
+        # 3. Load Model natively (Forcing the Image Mask head)
+        self.model = AutoModelForMaskGeneration.from_pretrained(
             local_path,
             device_map="auto",
             dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
