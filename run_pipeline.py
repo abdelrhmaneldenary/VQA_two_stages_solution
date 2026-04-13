@@ -124,8 +124,20 @@ def log_experiment(run_id, notes, config, metrics, pr_auc, log_file="experiment_
         ])
 
 # ==========================================
-# The Main Orchestrator
+# Device-Guard Helper
 # ==========================================
+def _model_to(model, device):
+    """Move model to device only when it is not already there."""
+    target = torch.device(device)
+    try:
+        current = next(model.parameters()).device
+        if current == target:
+            return
+    except StopIteration:
+        pass
+    model.to(device)
+
+
 def main():
     print(f"🚀 Initializing Production Run: {CONFIG['run_id']}")
     artifact_dir = create_artifact_dirs(CONFIG["run_id"])
@@ -151,14 +163,14 @@ def main():
             # --- STAGE 1: SEMANTIC ANCHORING ---
             # Ensure SAM is not hogging VRAM while Qwen runs
             if hasattr(stage2, 'model'):
-                stage2.model.to("cpu")
+                _model_to(stage2.model, "cpu")
             torch.cuda.empty_cache()
-            gc.collect()
 
-            raw_w, raw_h = Image.open(img_path).size
+            raw_image = Image.open(img_path).convert("RGB")
+            raw_w, raw_h = raw_image.size
             
             # 1. Semantics (Qwen) - Now running on GPU
-            stage1.model.to("cuda:0") # Or cuda:1 depending on your setup
+            _model_to(stage1.model, "cuda:0") # Or cuda:1 depending on your setup
             candidates, qwen_outputs, start_idx, end_idx, grid_h, grid_w = stage1.generate_candidates(
                 img_path, item["question"], few_shot_context, num_beams=CONFIG["num_beams"], diversity_penalty=CONFIG["lambda_penalty"]
             )
@@ -171,14 +183,14 @@ def main():
             # --- THE HANDOFF SHIELD ---
             # Kill Qwen memory before SAM starts
             del qwen_outputs
-            stage1.model.to("cpu")
+            _model_to(stage1.model, "cpu")
             torch.cuda.empty_cache()
             gc.collect()
 
             # --- STAGE 2: GEOMETRIC SEGMENTATION ---
             # 3. Geometry (SAM 3) - Move to GPU now
-            stage2.model.to("cuda:0") 
-            final_masks, _ = stage2.generate_masks(img_path, bimodal_tuples)
+            _model_to(stage2.model, "cuda:0")
+            final_masks, _ = stage2.generate_masks(raw_image, bimodal_tuples)
 
             # Extract anchor points from bimodal_tuples for anchor-aware Stage 3
             anchor_points = [pt for _, pt in bimodal_tuples]
@@ -206,7 +218,7 @@ def main():
                 saved_viz_count += 1
                 
             # Final cleanup for next image
-            stage2.model.to("cpu")
+            _model_to(stage2.model, "cpu")
             torch.cuda.empty_cache()
             gc.collect()
 
@@ -215,9 +227,6 @@ def main():
             traceback.print_exc()
             # Do NOT break the loop on a single image failure in production
             continue 
-        
-        torch.cuda.empty_cache()
-        gc.collect()
 
     # 5. Final Evaluation
     if len(y_pred) > 0:
