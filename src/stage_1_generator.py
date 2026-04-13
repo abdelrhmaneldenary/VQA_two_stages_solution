@@ -66,9 +66,6 @@ class Stage1Generator:
         self.captured_attentions = []
 
 
-        # ==========================================
-        # 🎯 THE BALANCED MACRO-PHYSICAL PROMPT
-        # ==========================================
         prompt_text = (
             f"{context_string}\n"
             f"Task: You are simulating a diverse crowd of human annotators. Answer the question by listing the distinct, concrete, physical objects visible in the image.\n"
