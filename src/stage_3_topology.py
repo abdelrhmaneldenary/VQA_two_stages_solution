@@ -1,5 +1,6 @@
 import numpy as np
 import cv2
+import re
 
 class TopologicalEvaluator:
     def __init__(self, w1_ciou=0.4, w2_conflict=0.6, w3_anchor=0.5, threshold=0.045):
@@ -34,6 +35,48 @@ class TopologicalEvaluator:
         min_area = min(mA.sum(), mB.sum())
         if min_area == 0: return 0.0
         return intersection / min_area
+
+    def _calculate_pixel_iou(self, maskA, maskB):
+        """Calculates pixel-perfect Intersection over Union."""
+        mA = maskA > 0
+        mB = maskB > 0
+        intersection = np.logical_and(mA, mB).sum()
+        union = np.logical_or(mA, mB).sum()
+        if union == 0:
+            return 0.0
+        return intersection / union
+
+    def _normalize_label(self, text):
+        if text is None:
+            return ""
+        text = str(text).lower().strip()
+        text = re.sub(r"[^a-z0-9\s]", " ", text)
+        return " ".join(text.split())
+
+    def _tokenize_label(self, text):
+        norm = self._normalize_label(text)
+        if not norm:
+            return set()
+        stop = {"a", "an", "the", "of", "on", "in", "for", "with", "and"}
+        return {tok for tok in norm.split() if tok and tok not in stop}
+
+    def _are_semantically_equivalent(self, label_a, label_b):
+        ta = self._tokenize_label(label_a)
+        tb = self._tokenize_label(label_b)
+        if not ta or not tb:
+            return False
+
+        if ta == tb:
+            return True
+
+        inter = ta.intersection(tb)
+        if not inter:
+            return False
+
+        jaccard = len(inter) / len(ta.union(tb))
+        containment = min(len(inter) / len(ta), len(inter) / len(tb))
+        # Conservative lexical-equivalence rule for synonyms/aliases.
+        return jaccard >= 0.6 or containment >= 0.8
 
     def _calculate_anchor_separation(self, anchor_points, image_size):
         """
@@ -80,7 +123,7 @@ class TopologicalEvaluator:
         conflict_ratio = (global_hull_area - actual_mask_area) / global_hull_area
         return max(0.0, min(1.0, conflict_ratio))
 
-    def evaluate(self, masks, anchor_points=None, image_size=None):
+    def evaluate(self, masks, anchor_points=None, image_size=None, candidate_labels=None):
         if len(masks) < 2:
             return 1, 0.0
 
@@ -90,6 +133,11 @@ class TopologicalEvaluator:
         valid_anchors = (
             [anchor_points[i] for i in valid_indices]
             if anchor_points is not None and len(anchor_points) == len(masks)
+            else None
+        )
+        valid_labels = (
+            [candidate_labels[i] for i in valid_indices]
+            if candidate_labels is not None and len(candidate_labels) == len(masks)
             else None
         )
 
@@ -125,6 +173,26 @@ class TopologicalEvaluator:
                 iom = self._calculate_pixel_iom(mask_parent, mask_child)
 
                 if iom >= 0.85:
+                    iou = self._calculate_pixel_iou(mask_parent, mask_child)
+                    area_parent = areas[j]
+                    area_child = areas[i]
+                    area_ratio = (min(area_parent, area_child) / max(area_parent, area_child)) if max(area_parent, area_child) > 0 else 0.0
+
+                    same_shape = iou >= 0.98
+                    strong_containment = iom >= 0.98 and area_ratio <= 0.6
+                    semantic_match = (
+                        self._are_semantically_equivalent(valid_labels[i], valid_labels[j])
+                        if valid_labels is not None
+                        else False
+                    )
+
+                    # Bypass anchor-distance guard when:
+                    # 1) Same geometry + semantically equivalent labels (synonyms)
+                    # 2) Very strong containment with large size mismatch (part-to-whole)
+                    if (same_shape and semantic_match) or strong_containment:
+                        is_absorbed = True
+                        break
+
                     # Anchor-aware guard: if the two candidates point to
                     # spatially distant regions, they represent distinct
                     # entities (e.g. separate text labels printed on the

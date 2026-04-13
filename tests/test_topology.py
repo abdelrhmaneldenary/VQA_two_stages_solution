@@ -65,6 +65,7 @@ def test_ocr_same_mask_distant_anchors_is_multiple(evaluator):
         [bottle_mask.copy(), bottle_mask.copy()],
         anchor_points=anchors,
         image_size=(W, H),
+        candidate_labels=["Marshak Creek", "Steak Rub"],
     )
     assert pred == 0, f"OCR case must be MULTIPLE; got Single (D_Score={score:.4f})"
     assert score > evaluator.threshold, (
@@ -85,8 +86,25 @@ def test_ocr_same_mask_close_anchors_is_single(evaluator):
         [bottle_mask.copy(), bottle_mask.copy()],
         anchor_points=anchors,
         image_size=(W, H),
+        candidate_labels=["Marshak Creek", "Marshak Creek"],
     )
     assert pred == 1, f"Collocated OCR must be SINGLE; got Multiple (D_Score={score:.4f})"
+
+
+def test_synonym_same_mask_distant_anchors_is_single(evaluator):
+    """
+    Synonymous labels for one macro-object should be absorbed even if
+    peak-suppression pushed anchors apart.
+    """
+    H, W = 480, 640
+    phone_mask = _make_rect_mask(H, W, 120, 370, 240, 430)
+    pred, score = evaluator.evaluate(
+        [phone_mask.copy(), phone_mask.copy()],
+        anchor_points=[(280, 160), (420, 330)],
+        image_size=(W, H),
+        candidate_labels=["Nokia phone", "Nokia mobile phone"],
+    )
+    assert pred == 1, f"Synonym case must be SINGLE; got Multiple (D_Score={score:.4f})"
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +129,24 @@ def test_laptop_screen_inside_parent_is_single(evaluator):
         image_size=(W, H),
     )
     assert pred == 1, f"Laptop+screen must be SINGLE; got Multiple (D_Score={score:.4f})"
+
+
+def test_part_to_whole_distant_containment_is_single(evaluator):
+    """
+    Part-to-whole should be absorbed when containment is near-complete and
+    child area is much smaller, even with distant anchors.
+    """
+    H, W = 600, 800
+    couch_mask = _make_rect_mask(H, W, 100, 560, 80, 760)
+    pillow_mask = _make_rect_mask(H, W, 330, 520, 520, 740)  # inside couch
+
+    pred, score = evaluator.evaluate(
+        [couch_mask, pillow_mask],
+        anchor_points=[(180, 210), (700, 450)],  # sep > 0.15 image diagonal
+        image_size=(W, H),
+        candidate_labels=["couch", "blue pillow"],
+    )
+    assert pred == 1, f"Couch+pillow must be SINGLE; got Multiple (D_Score={score:.4f})"
 
 
 # ---------------------------------------------------------------------------
