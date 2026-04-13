@@ -262,10 +262,11 @@ class TopologicalEvaluator:
                             continue
 
                     allow_low_similarity_absorb = semantic_match and skill != "TEXT"
-                    if similarity < self.TEXT_ABSORB_SIM_THRESHOLD and not allow_low_similarity_absorb:
-                        continue
-
-                    if semantic_match or similarity >= self.TEXT_ABSORB_SIM_THRESHOLD:
+                    should_absorb = (
+                        similarity >= self.TEXT_ABSORB_SIM_THRESHOLD
+                        or allow_low_similarity_absorb
+                    )
+                    if should_absorb:
                         is_absorbed = True
                         break
                     continue

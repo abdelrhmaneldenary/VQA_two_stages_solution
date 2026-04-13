@@ -267,7 +267,7 @@ def test_object_skill_dampens_divergence_score(evaluator):
         anchor_points=[(150, 330), (550, 115)],
         image_size=(W, H),
         candidate_labels=["car", "traffic light"],
-        predicted_skill="TEXT",
+        predicted_skill="COUNT",
     )
     _, score_object = evaluator.evaluate(
         [car_mask, light_mask],

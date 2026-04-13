@@ -146,7 +146,6 @@ class Stage1Generator:
         color_patterns = [r"\bcolor\b", r"\bcolour\b", r"\bshade\b", r"\bhue\b"]
         count_patterns = [
             r"\bhow many\b", r"\bnumber of\b", r"\bcount\b",
-            r"\bseveral\b", r"\bfew\b", r"\bmany\b"
         ]
 
         if any(re.search(p, q) for p in text_patterns):
