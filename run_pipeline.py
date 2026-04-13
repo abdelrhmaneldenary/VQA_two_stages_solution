@@ -318,8 +318,8 @@ def main():
     stage3 = TopologicalEvaluator(w1_ciou=CONFIG["w1_ciou"], w2_conflict=CONFIG["w2_conflict"])
 
     # Limit to 10 for Real Debugging
-    test_subset = val_dataset[:10] 
-    
+# Hunt down 5 images specifically labeled as "multiple"
+    test_subset = [item for item in val_dataset if item.get("binary_label") == "multiple"][:5]    
     y_true, y_pred, y_scores, sources = [], [], [], []
 
     for idx, item in enumerate(test_subset):
