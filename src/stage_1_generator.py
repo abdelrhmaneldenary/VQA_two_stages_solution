@@ -1,23 +1,33 @@
 import ast
 import re
+import os # <-- Added for path resolution
 import torch
 from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
 from qwen_vl_utils import process_vision_info
 
-
 class Stage1Generator:
     def __init__(self, model_id="Qwen/Qwen2.5-VL-3B-Instruct"):
-        print(f"🚀 Loading Stage 1 (Qwen2.5-VL): {model_id}")
-        self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        # 1. Force the model_id into an absolute local path
+        local_path = os.path.abspath(model_id) if os.path.exists(model_id) else model_id
+        print(f"🚀 Loading Stage 1 (Qwen2.5-VL): {local_path}")
+        
+        # 2. Add local_files_only=True to prevent HF Hub validation crashes
+        self.processor = AutoProcessor.from_pretrained(
+            local_path, 
+            trust_remote_code=True,
+            local_files_only=True if os.path.exists(model_id) else False
+        )
 
         dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
-            model_id,
+            local_path,
             torch_dtype=dtype,
             device_map="auto",
             trust_remote_code=True,
+            local_files_only=True if os.path.exists(model_id) else False
         )
         self.model.eval()
+
 
     def _run_prompt(self, image_path, prompt, max_new_tokens=64):
         messages = [

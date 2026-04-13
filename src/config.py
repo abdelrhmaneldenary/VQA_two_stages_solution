@@ -6,8 +6,8 @@ BASE_DATA_DIR = "/kaggle/input/datasets/abdelrhmanshaheen/answer-therapy" if IS_
 CONFIG = {
     "run_id": "EXP_QWEN25_SAM3_SIMPLE",
     "notes": "Simple Qwen2.5-VL + SAM3 IoU baseline",
-    "model_s1_path": "/kaggle/input/datasets/ruhul77/qwen2-5-vl-3b-instruct" if IS_KAGGLE else "Qwen/Qwen2.5-VL-3B-Instruct",
-    "model_s2_path": "/kaggle/input/datasets/abdelrhmaneldenary/sam3-h" if IS_KAGGLE else "facebook/sam3-h",
+    "model_s1_path": "/kaggle/input/datasets/ruhul77/qwen2-5-vl-3b-instruct",
+    "model_s2_path": "/kaggle/input/datasets/abdelrhmaneldenary/sam3-h"  ,
     "iou_threshold": 0.5,
     "dataset_dir": BASE_DATA_DIR,
 }
