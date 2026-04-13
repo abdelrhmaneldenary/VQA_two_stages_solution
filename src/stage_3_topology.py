@@ -5,13 +5,13 @@ from difflib import SequenceMatcher
 
 class TopologicalEvaluator:
     LABEL_STOPWORDS = {"a", "an", "the", "of", "on", "in", "for", "with", "and", "at", "by", "to", "from", "or", "but", "as", "if"}
-    SEMANTIC_JACCARD_THRESHOLD = 0.55
-    SEMANTIC_CONTAINMENT_THRESHOLD = 0.5
-    SEMANTIC_CHAR_SIM_THRESHOLD = 0.78
-    ABSORB_MIN_IOM = 0.85
-    SAME_MASK_IOU = 0.98
-    STRONG_CONTAINMENT_IOM = 0.98
-    STRONG_CONTAINMENT_AREA_RATIO = 0.6
+    SEMANTIC_JACCARD_THRESHOLD = 0.55  # token overlap for alias-like phrases
+    SEMANTIC_CONTAINMENT_THRESHOLD = 0.5  # "nokia phone" vs "mobile phone" style containment
+    SEMANTIC_CHAR_SIM_THRESHOLD = 0.78  # high char-level similarity for near-duplicate strings
+    ABSORB_MIN_IOM = 0.85  # minimum mask overlap before any absorption is considered
+    SAME_MASK_IOU = 0.98  # near-identical geometry gate
+    STRONG_CONTAINMENT_IOM = 0.98  # near-complete parent-child containment gate
+    STRONG_CONTAINMENT_AREA_RATIO = 0.6  # child must be meaningfully smaller than parent
 
     def __init__(self, w1_ciou=0.4, w2_conflict=0.6, w3_anchor=0.5, w3_semantic=None, threshold=0.045):
         print("🚀 Initializing VizWiz Geometry+Semantic Topological Evaluator...")
@@ -88,10 +88,18 @@ class TopologicalEvaluator:
         if not inter:
             return False
 
-        jaccard = len(inter) / len(ta.union(tb))
+        jaccard = self._token_jaccard(ta, tb)
         containment = min(len(inter) / len(ta), len(inter) / len(tb))
         # Lexical-equivalence rule for synonyms/aliases, using only lightweight string math.
         return jaccard >= self.SEMANTIC_JACCARD_THRESHOLD or containment >= self.SEMANTIC_CONTAINMENT_THRESHOLD
+
+    def _token_jaccard(self, ta, tb):
+        if not ta or not tb:
+            return 0.0
+        union = len(ta.union(tb))
+        if union == 0:
+            return 0.0
+        return len(ta.intersection(tb)) / union
 
     def _semantic_similarity(self, label_a, label_b):
         a = self._normalize_label(label_a)
@@ -104,12 +112,7 @@ class TopologicalEvaluator:
 
         ta = self._tokenize_label(a)
         tb = self._tokenize_label(b)
-        if ta and tb:
-            inter = len(ta.intersection(tb))
-            union = len(ta.union(tb))
-            jaccard = inter / union if union > 0 else 0.0
-        else:
-            jaccard = 0.0
+        jaccard = self._token_jaccard(ta, tb)
 
         char_ratio = SequenceMatcher(None, a, b).ratio()
         return max(char_ratio, jaccard)

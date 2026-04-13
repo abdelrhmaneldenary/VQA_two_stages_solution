@@ -124,6 +124,10 @@ def test_synonym_same_mask_distant_anchors_is_single(evaluator):
 
 
 def test_synonym_same_mask_without_anchors_is_single(evaluator):
+    """
+    Synonym-like labels for one object should still collapse to SINGLE even
+    when anchor metadata is unavailable.
+    """
     H, W = 480, 640
     phone_mask = _make_rect_mask(H, W, 120, 370, 240, 430)
     pred, score = evaluator.evaluate(
