@@ -29,47 +29,50 @@ class TopologicalEvaluator:
         ymin, ymax = np.where(rows)[0][[0, -1]]
         xmin, xmax = np.where(cols)[0][[0, -1]]
         return [xmin, ymin, xmax, ymax]
-
+    
     def _calculate_ciou(self, boxA, boxB):
-        xA = max(boxA[0], boxB[0])
-        yA = max(boxA[1], boxB[1])
-        xB = min(boxA[2], boxB[2])
-        yB = min(boxA[3], boxB[3])
+            xA = max(boxA[0], boxB[0])
+            yA = max(boxA[1], boxB[1])
+            xB = min(boxA[2], boxB[2])
+            yB = min(boxA[3], boxB[3])
 
-        inter_area = max(0, xB - xA) * max(0, yB - yA)
-        
-        boxA_area = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
-        boxB_area = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
-        union_area = float(boxA_area + boxB_area - inter_area)
-        
-        if union_area == 0:
-            return 0.0
+            inter_area = max(0, xB - xA) * max(0, yB - yA)
             
-        iou = inter_area / union_area
-
-        center_Ax, center_Ay = (boxA[0] + boxA[2])/2, (boxA[1] + boxA[3])/2
-        center_Bx, center_By = (boxB[0] + boxB[2])/2, (boxB[1] + boxB[3])/2
-        centroid_distance_sq = (center_Ax - center_Bx)**2 + (center_Ay - center_By)**2
-        
-        enc_x1, enc_y1 = min(boxA[0], boxB[0]), min(boxA[1], boxB[1])
-        enc_x2, enc_y2 = max(boxA[2], boxB[2]), max(boxA[3], boxB[3])
-        diagonal_length_sq = (enc_x2 - enc_x1)**2 + (enc_y2 - enc_y1)**2
-
-        w_A, h_A = boxA[2] - boxA[0], boxA[3] - boxA[1]
-        w_B, h_B = boxB[2] - boxB[0], boxB[3] - boxB[1]
-        
-        # --- THE 1-PIXEL CRASH FIX ---
-        # math.atan2(y, x) mathematically bypasses ZeroDivisionError if h_A or h_B is 0.
-        v = (4.0 / (math.pi ** 2)) * (math.atan2(w_A, h_A) - math.atan2(w_B, h_B)) ** 2
-        # -----------------------------
-        
-        alpha = v / (1.0 - iou + v + 1e-6)
-        
-        if diagonal_length_sq == 0:
-            return iou
+            boxA_area = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+            boxB_area = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
             
-        ciou = iou - (centroid_distance_sq / diagonal_length_sq) - (alpha * v)
-        return max(0.0, min(1.0, ciou)) 
+            # --- THE CONTAINMENT FIX (IoM) ---
+            # Divide by the minimum area, not the union. 
+            # If a small box (pillow/text) is inside a big box (couch/bottle), overlap is 1.0.
+            min_area = float(min(boxA_area, boxB_area))
+            
+            if min_area == 0:
+                return 0.0
+                
+            iom = inter_area / min_area
+            # ---------------------------------
+
+            center_Ax, center_Ay = (boxA[0] + boxA[2])/2, (boxA[1] + boxA[3])/2
+            center_Bx, center_By = (boxB[0] + boxB[2])/2, (boxB[1] + boxB[3])/2
+            centroid_distance_sq = (center_Ax - center_Bx)**2 + (center_Ay - center_By)**2
+            
+            enc_x1, enc_y1 = min(boxA[0], boxB[0]), min(boxA[1], boxB[1])
+            enc_x2, enc_y2 = max(boxA[2], boxB[2]), max(boxA[3], boxB[3])
+            diagonal_length_sq = (enc_x2 - enc_x1)**2 + (enc_y2 - enc_y1)**2
+
+            w_A, h_A = boxA[2] - boxA[0], boxA[3] - boxA[1]
+            w_B, h_B = boxB[2] - boxB[0], boxB[3] - boxB[1]
+            
+            v = (4.0 / (math.pi ** 2)) * (math.atan2(w_A, h_A) - math.atan2(w_B, h_B)) ** 2
+            
+            # Use IoM as the base for the alpha calculation
+            alpha = v / (1.0 - iom + v + 1e-6)
+            
+            if diagonal_length_sq == 0:
+                return iom
+                
+            ciou = iom - (centroid_distance_sq / diagonal_length_sq) - (alpha * v)
+            return max(0.0, min(1.0, ciou))
 
     def _calculate_conflict_ratio_and_variance(self, masks):
         hull_areas = []
