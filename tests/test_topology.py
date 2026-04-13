@@ -113,6 +113,8 @@ def test_duplicate_text_same_mask_far_anchors_is_multiple(evaluator):
     """
     H, W = 480, 640
     bottle_mask = _make_rect_mask(H, W, 100, 380, 220, 420)
+    sep = evaluator._pair_anchor_distance((320, 140), (320, 340), (W, H))
+    assert sep > evaluator.DUP_TEXT_ANCHOR_SEP_THRESHOLD
     pred, score = evaluator.evaluate(
         [bottle_mask.copy(), bottle_mask.copy()],
         anchor_points=[(320, 140), (320, 340)],
@@ -120,6 +122,7 @@ def test_duplicate_text_same_mask_far_anchors_is_multiple(evaluator):
         candidate_labels=["cinnamon", "cinnamon"],
     )
     assert pred == 0, f"Distant duplicate text must be MULTIPLE; got Single (D_Score={score:.4f})"
+    assert score > evaluator.threshold
 
 
 def test_synonym_same_mask_distant_anchors_is_single(evaluator):
