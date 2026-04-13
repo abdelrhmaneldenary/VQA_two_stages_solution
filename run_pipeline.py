@@ -276,7 +276,7 @@ def main():
     few_shot_context = " "
 
     stage1 = Stage1Generator(model_id=CONFIG["model_s1_path"])  
-    bridge = LatentBridge(logit_scale_factor=CONFIG["logit_scale"])    
+    bridge = LatentBridge()    
     stage2 = Stage2Segmentor(model_id=CONFIG["model_s2_path"])
     stage3 = TopologicalEvaluator(w1_ciou=CONFIG["w1_ciou"], w2_conflict=CONFIG["w2_conflict"], threshold=CONFIG["threshold"])
 
