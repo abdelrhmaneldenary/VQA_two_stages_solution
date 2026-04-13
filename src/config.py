@@ -24,7 +24,7 @@ CONFIG = {
     # Stage 3 Parameters
     "w1_ciou": 0.4,
     "w2_conflict": 0.6,
-    "threshold": 0.5, 
+    "threshold": 0.045, 
     
     # Paths
     "dataset_dir": BASE_DATA_DIR,
