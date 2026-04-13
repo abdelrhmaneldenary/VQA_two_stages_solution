@@ -1,93 +1,95 @@
 import os
 import gc
+import cv2
 import torch
 import numpy as np
 from PIL import Image
-from transformers import AutoModelForMaskGeneration, AutoProcessor
+from transformers import AutoProcessor, AutoModelForMaskGeneration
 
 class Stage2Segmenter:
     def __init__(self, model_id):
-        # 1. Force the Kaggle absolute path
         local_path = os.path.abspath(model_id) if os.path.exists(model_id) else model_id
-        print(f"🚀 Loading Stage 2 (HF SAM 3): {local_path}")
+        print(f"🚀 Loading Stage 2 (HF SAM 3 - Text Prompt Armored): {local_path}")
         
-        # 2. Load Processor safely
         self.processor = AutoProcessor.from_pretrained(
             local_path,
             trust_remote_code=True,
             local_files_only=True if os.path.exists(model_id) else False
         )
         
-        # 3. Load Model with EAGER ATTENTION to bypass the SDPA crash
+        # Start on CPU for Model Ping-Pong
         self.model = AutoModelForMaskGeneration.from_pretrained(
-                    local_path,
-                    device_map="cuda:0", # <--- CHANGE THIS FROM "auto"
-                    dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-                    attn_implementation="eager",
-                    trust_remote_code=True,
-                    local_files_only=True if os.path.exists(model_id) else False
-                )
+            local_path,
+            device_map="cpu", # Will be moved to cuda:0 during the loop
+            dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+            attn_implementation="eager", # Bypasses the Hugging Face text-attention bug
+            trust_remote_code=True,
+            local_files_only=True if os.path.exists(model_id) else False
+        )
         self.model.eval()
 
-    def _to_image(self, image_or_path):
-        if isinstance(image_or_path, Image.Image):
-            return image_or_path.convert("RGB")
-        return Image.open(image_or_path).convert("RGB")
-
-    def generate_masks(self, image_or_path, labels):
-        image = self._to_image(image_or_path)
-        masks = []
-        scores = []
-
+    def generate_masks(self, image_path, labels):
+        raw_image = Image.open(image_path).convert("RGB")
+        orig_w, orig_h = raw_image.size
+        
+        # --- THE VRAM SHIELD: DYNAMIC RESOLUTION CAPPING ---
+        safe_h, safe_w = orig_h, orig_w
+        if safe_h > 1024 or safe_w > 1024:
+            scale_factor = 1024.0 / max(safe_h, safe_w)
+            safe_h = int(safe_h * scale_factor)
+            safe_w = int(safe_w * scale_factor)
+            
+        safe_image = raw_image.resize((safe_w, safe_h), Image.Resampling.LANCZOS)
+        
+        final_masks = []
+        mask_scores = []
+        
         for label in labels:
             try:
-                # 1. THE PROCESSOR BYPASS (Fixes the 'text' kwarg error)
-                image_inputs = self.processor.image_processor(images=image, return_tensors="pt")
-                # No padding needed for single word labels
-                text_inputs = self.processor.tokenizer(text=label, return_tensors="pt") 
+                # 1. PROCESSOR BYPASS (Explicit text & image merging)
+                image_inputs = self.processor.image_processor(images=safe_image, return_tensors="pt")
+                text_inputs = self.processor.tokenizer(text=label, return_tensors="pt")
                 
-                # Merge the dictionaries explicitly
                 inputs = {**image_inputs, **text_inputs}
                 
-                # Strip out the text attention mask if it exists to prevent further SDPA collisions
+                # Fix SDPA crash for text/vision mask collision
                 if "attention_mask" in inputs:
                     del inputs["attention_mask"]
-
+                    
                 inputs = {k: v.to(self.model.device) if torch.is_tensor(v) else v for k, v in inputs.items()}
 
-                # 2. THE FORWARD PASS
+                # 2. FORWARD PASS
                 with torch.no_grad():
                     outputs = self.model(**inputs)
 
-                # 3. NATIVE MASK EXTRACTION
+                # 3. EXTRACTION
                 if hasattr(outputs, "pred_masks"):
                     mask = (outputs.pred_masks > 0.0).squeeze().cpu().numpy()
                 else:
                     mask = (outputs[0] > 0.0).squeeze().cpu().numpy()
 
-                # Ensure mask is exactly 2D (Height x Width)
                 if mask.ndim > 2:
                     mask = mask[0]
+                    
+                mask_uint8 = mask.astype(np.uint8)
 
-                # SAM usually outputs IoU scores; default to 1.0 if not found
-                if hasattr(outputs, "iou_scores"):
-                    score = outputs.iou_scores.max().item() 
-                else:
-                    score = 1.0
+                # 4. CPU UPSCALER (Nearest Neighbor to strictly preserve 0s and 1s)
+                if (safe_w, safe_h) != (orig_w, orig_h):
+                    mask_uint8 = cv2.resize(mask_uint8, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
 
-                masks.append(mask)
-                scores.append(score)
+                score = outputs.iou_scores.max().item() if hasattr(outputs, "iou_scores") else 1.0
+
+                final_masks.append(mask_uint8)
+                mask_scores.append(score)
 
             except Exception as e:
-                print(f"⚠️ Stage 2 OOM/Error on label '{label}': {e}")
-                # Emit a blank boolean mask to keep the pipeline moving
-                blank_mask = np.zeros((image.height, image.width), dtype=bool)
-                masks.append(blank_mask)
-                scores.append(0.0)
-
+                print(f"⚠️ Stage 2 Error on label '{label}': {e}")
+                final_masks.append(np.zeros((orig_h, orig_w), dtype=np.uint8))
+                mask_scores.append(0.0)
+                
             finally:
-                # Per-label memory flush to prevent mid-image OOM spikes
+                del inputs
                 torch.cuda.empty_cache()
                 gc.collect()
 
-        return masks, scores
+        return final_masks, mask_scores

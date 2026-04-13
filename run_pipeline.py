@@ -1,26 +1,16 @@
-import csv
 import os
-import json
 import gc
+import json
 import torch
-from datetime import datetime
-
 import numpy as np
-from sklearn.metrics import f1_score, precision_score, recall_score
+from datetime import datetime
 from PIL import Image
+from sklearn.metrics import f1_score, precision_score, recall_score
 
 from src.config import CONFIG
 from src.data_loader import VQADatasetLoader
 from src.stage_1_generator import Stage1Generator
 from src.stage_2_segmenter import Stage2Segmenter
-
-# (Assuming resize_for_vram is defined here or imported)
-def resize_for_vram(image_path, max_dim=1024):
-    """Prevents 40GB VRAM explosions by capping image resolution."""
-    img = Image.open(image_path).convert("RGB")
-    if max(img.size) > max_dim:
-        img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
-    return img
 
 def calculate_iou(mask_a, mask_b):
     a = mask_a > 0
@@ -45,27 +35,8 @@ def classify_from_masks(masks, threshold=0.5):
     prediction = 1 if max_iou > threshold else 0
     return prediction, max_iou
 
-def log_experiment(metrics, run_id, timestamp, csv_path="experiment_tracker.csv"):
-    file_exists = os.path.isfile(csv_path)
-    with open(csv_path, mode="a", newline="") as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow([
-                "run_id", "date", 
-                "overall_f1", "overall_precision", "overall_recall",
-                "vqav2_f1", "vqa_precision", "vqa_recall",
-                "vizwiz_f1", "vizwiz_precision", "vizwiz_recall"
-            ])
-        writer.writerow([
-            run_id, timestamp,
-            f"{metrics['overall_f1']:.2f}", f"{metrics['overall_precision']:.2f}", f"{metrics['overall_recall']:.2f}",
-            f"{metrics['vqav2_f1']:.2f}", f"{metrics['vqa_precision']:.2f}", f"{metrics['vqa_recall']:.2f}",
-            f"{metrics['vizwiz_f1']:.2f}", f"{metrics['vizwiz_precision']:.2f}", f"{metrics['vizwiz_recall']:.2f}",
-        ])
-
 def main():
-    print(f"🚀 Running: {CONFIG['run_id']}")
-    run_date = datetime.now().strftime("%Y-%m-%d")
+    print(f"🚀 Running ARMORED SIMPLE PIPELINE: {CONFIG['run_id']}")
 
     data_loader = VQADatasetLoader(CONFIG["dataset_dir"])
     val_dataset = data_loader.load_and_balance(split="val", force_balance=False)
@@ -73,7 +44,6 @@ def main():
     stage1 = Stage1Generator(model_id=CONFIG["model_s1_path"])
     stage2 = Stage2Segmenter(model_id=CONFIG["model_s2_path"])
 
-    # Dictionaries to track metrics separately
     results = {
         "overall": {"y_true": [], "y_pred": []},
         "vqav2": {"y_true": [], "y_pred": []},
@@ -83,11 +53,29 @@ def main():
     for idx, item in enumerate(val_dataset):
         img_path = item["resolved_image_path"]
         question = item["question"]
+        
+        dataset_source = "vizwiz" if "vizwiz" in str(img_path).lower() else "vqav2"
 
         try:
-            image = resize_for_vram(img_path, max_dim=1024)
-            count, labels = stage1.generate_grounding_plan(image, question)
-            masks, _ = stage2.generate_masks(image, labels)
+            # --- MODEL PING-PONG: STAGE 1 ---
+            # Move SAM off GPU, Move Qwen to GPU
+            stage2.model.to("cpu")
+            torch.cuda.empty_cache()
+            gc.collect()
+            stage1.model.to("cuda:0")
+
+            count, labels = stage1.generate_grounding_plan(img_path, question)
+
+            # --- MODEL PING-PONG: STAGE 2 ---
+            # Move Qwen off GPU, Move SAM to GPU
+            stage1.model.to("cpu")
+            torch.cuda.empty_cache()
+            gc.collect()
+            stage2.model.to("cuda:0")
+
+            masks, _ = stage2.generate_masks(img_path, labels)
+            
+            # --- CLASSIFY ---
             pred, max_iou = classify_from_masks(masks, threshold=CONFIG["iou_threshold"])
 
             binary_label = str(item.get("binary_label", "")).strip().lower()
@@ -96,65 +84,43 @@ def main():
             elif binary_label == "multiple":
                 gt = 0
             else:
-                print(f"[{idx + 1}/{len(val_dataset)}] skipped: invalid binary_label={item.get('binary_label')}")
                 continue
-            
-            # Determine dataset source based on path or metadata
-            path_str = str(img_path).lower()
-            dataset_source = "vizwiz" if "vizwiz" in path_str else "vqav2"
 
-            # Append to overall
             results["overall"]["y_true"].append(gt)
             results["overall"]["y_pred"].append(pred)
-            
-            # Append to specific split
             results[dataset_source]["y_true"].append(gt)
             results[dataset_source]["y_pred"].append(pred)
 
             print(
-                f"[{idx + 1}/{len(val_dataset)}] [{dataset_source.upper()}] count={count} labels={labels} "
-                f"max_iou={max_iou:.3f} pred={'Single' if pred == 1 else 'Multiple'}"
+                f"[{idx + 1}/{len(val_dataset)}] [{dataset_source.upper()}] "
+                f"labels={labels} max_iou={max_iou:.3f} pred={'Single' if pred == 1 else 'Multiple'}"
             )
+            
         except Exception as e:
             print(f"[{idx + 1}/{len(val_dataset)}] failed: {e}")
             continue
+            
         finally:
-            # Prevent Kaggle T4 OOM Crashes
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
             gc.collect()
 
-    if not results["overall"]["y_true"]:
-        print("No successful samples.")
-        return
-
-    # Calculate metrics for all subsets
+    # --- METRICS LOGGING ---
     metrics = {}
     for subset in ["overall", "vqav2", "vizwiz"]:
-        yt = results[subset]["y_true"]
-        yp = results[subset]["y_pred"]
-        
-        # Avoid zero division if a subset is completely missing
+        yt, yp = results[subset]["y_true"], results[subset]["y_pred"]
         if len(yt) > 0:
-            f1 = f1_score(yt, yp, zero_division=0) * 100
-            p = precision_score(yt, yp, zero_division=0) * 100
-            r = recall_score(yt, yp, zero_division=0) * 100
+            metrics[f"{subset}_f1" if subset != "overall" else "overall_f1"] = round(f1_score(yt, yp, zero_division=0) * 100, 2)
+            prefix = "vqa" if subset == "vqav2" else subset
+            metrics[f"{prefix}_precision"] = round(precision_score(yt, yp, zero_division=0) * 100, 2)
+            metrics[f"{prefix}_recall"] = round(recall_score(yt, yp, zero_division=0) * 100, 2)
         else:
-            f1, p, r = 0.0, 0.0, 0.0
+             metrics[f"{subset}_f1" if subset != "overall" else "overall_f1"] = 0.0
+             prefix = "vqa" if subset == "vqav2" else subset
+             metrics[f"{prefix}_precision"] = 0.0
+             metrics[f"{prefix}_recall"] = 0.0
 
-        # Format exactly as requested
-        prefix = "vqa" if subset == "vqav2" else subset
-        
-        metrics[f"{subset}_f1" if subset != "overall" else "overall_f1"] = round(f1, 2)
-        metrics[f"{prefix}_precision"] = round(p, 2)
-        metrics[f"{prefix}_recall"] = round(r, 2)
-
-    # Print exact JSON format requested
     print("\n✅ Final Evaluation Metrics:")
     print(json.dumps(metrics, indent=2))
-
-    log_experiment(metrics, CONFIG["run_id"], run_date)
-
 
 if __name__ == "__main__":
     main()
