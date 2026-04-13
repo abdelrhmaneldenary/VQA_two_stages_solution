@@ -4,9 +4,12 @@ import torch
 import numpy as np
 from PIL import Image
 
-# Import the native SAM 3 builder (assuming 'sam3' is installed in your Kaggle environment)
-from sam3.build_sam3 import build_sam3
+# The file is usually just "build_sam"
+from sam3.build_sam import build_sam3 
 from sam3.sam3_image_predictor import SAM3ImagePredictor
+
+# NOTE: If the predictor import fails next, try changing it to:
+# from sam3.image_predictor import SAM3ImagePredictor
 
 class Stage2Segmenter:
     def __init__(self, model_id):
