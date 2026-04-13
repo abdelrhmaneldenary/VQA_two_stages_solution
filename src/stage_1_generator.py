@@ -85,11 +85,13 @@ class Stage1Generator:
         image_inputs, video_inputs = process_vision_info(messages)
         inputs = self.processor(text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt").to(self.model.device)
 
-        # --- THE ASPECT RATIO FIX ---
-        # Capture the true geometric shape of the image patches before passing to the bridge
+        # --- THE ASPECT RATIO & PATCH MERGE FIX ---
+        # Capture the true geometric shape of the image patches.
+        # Qwen2-VL heavily compresses images by merging 2x2 patch blocks into a single token.
+        # We MUST divide the raw grid height and width by 2 to match the actual LLM sequence space!
         image_grid_thw = inputs["image_grid_thw"][0] # Shape: (Time, Height, Width)
-        grid_h = image_grid_thw[1].item()
-        grid_w = image_grid_thw[2].item()
+        grid_h = image_grid_thw[1].item() // 2       # Divide by 2
+        grid_w = image_grid_thw[2].item() // 2       # Divide by 2
         # -----------------------------
 
         input_ids = inputs["input_ids"][0].cpu()
