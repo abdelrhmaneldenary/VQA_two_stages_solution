@@ -3,30 +3,42 @@ import gc
 import torch
 import numpy as np
 from PIL import Image
-from transformers import AutoModelForMaskGeneration, AutoProcessor
+
+# Import the native SAM 3 builder (assuming 'sam3' is installed in your Kaggle environment)
+from sam3.build_sam3 import build_sam3
+from sam3.sam3_image_predictor import SAM3ImagePredictor
 
 class Stage2Segmenter:
     def __init__(self, model_id):
-        # 1. Force the Kaggle absolute path
         local_path = os.path.abspath(model_id) if os.path.exists(model_id) else model_id
-        print(f"🚀 Loading Stage 2 (SAM 3): {local_path}")
+        print(f"🚀 Loading Stage 2 (Native SAM 3): {local_path}")
         
-        # 2. Load Processor safely
-        self.processor = AutoProcessor.from_pretrained(
-            local_path,
-            trust_remote_code=True,
-            local_files_only=True if os.path.exists(model_id) else False
-        )
+        # 1. Determine the config based on the folder name or contents
+        # (Usually sam3_h.yaml, sam3_l.yaml, etc. Defaulting to huge 'h' if unknown)
+        # Note: You may need to change this string if your config is different!
+        config_file = "sam3_configs/sam3.yaml" 
         
-        # 3. Load Model natively (Forcing the Image Mask head)
-        self.model = AutoModelForMaskGeneration.from_pretrained(
-            local_path,
-            device_map="auto",
-            dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-            trust_remote_code=True,
-            local_files_only=True if os.path.exists(model_id) else False
-        )
-        self.model.eval()
+        # Look for the .pt or .pth file in the directory
+        weight_file = None
+        if os.path.isdir(local_path):
+            for file in os.listdir(local_path):
+                if file.endswith(('.pt', '.pth')):
+                    weight_file = os.path.join(local_path, file)
+                    break
+        else:
+            weight_file = local_path
+            
+        if not weight_file:
+             raise FileNotFoundError(f"Could not find a .pt/.pth file in {local_path}")
+
+        # 2. Load the native model
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # We load in bfloat16 to save memory
+        self.model = build_sam3(config_file, weight_file, device=device)
+        self.model.bfloat16()
+        
+        # 3. Use the native Predictor wrapper
+        self.predictor = SAM3ImagePredictor(self.model)
 
     def _to_image(self, image_or_path):
         if isinstance(image_or_path, Image.Image):
@@ -35,55 +47,46 @@ class Stage2Segmenter:
 
     def generate_masks(self, image_or_path, labels):
         image = self._to_image(image_or_path)
-        masks = []
-        scores = []
+        # SAM 3 predictor expects a numpy array, not a PIL image
+        image_np = np.array(image)
+        
+        masks_out = []
+        scores_out = []
 
-        for label in labels:
-            try:
-                # 1. THE PROCESSOR BYPASS (Fixes the 'text' kwarg error)
-                image_inputs = self.processor.image_processor(images=image, return_tensors="pt")
-                text_inputs = self.processor.tokenizer(text=label, padding=True, return_tensors="pt")
-                
-                # Merge the dictionaries explicitly
-                inputs = {**image_inputs, **text_inputs}
-                inputs = {k: v.to(self.model.device) if torch.is_tensor(v) else v for k, v in inputs.items()}
+        try:
+            # Tell the predictor what image we are working with
+            self.predictor.set_image(image_np)
 
-                # 2. THE FORWARD PASS (Fixes the 'generate' missing attribute error)
-                with torch.no_grad():
-                    outputs = self.model(**inputs)
+            for label in labels:
+                try:
+                    # NATIVE INFERENCE: Pass the text prompt directly to the predictor
+                    masks, scores, _ = self.predictor.predict(
+                        text_prompt=label,
+                        multimask_output=False # We just want the best mask
+                    )
+                    
+                    # SAM3 returns arrays. Grab the highest scoring mask.
+                    best_idx = np.argmax(scores)
+                    mask = masks[best_idx]
+                    score = scores[best_idx]
+                    
+                    masks_out.append(mask)
+                    scores_out.append(score)
 
-                # 3. NATIVE MASK EXTRACTION (SAM outputs spatial masks directly)
-                if hasattr(outputs, "pred_masks"):
-                    # Standard SAM format
-                    mask = (outputs.pred_masks > 0.0).squeeze().cpu().numpy()
-                else:
-                    # Fallback if custom weights use a tuple output
-                    mask = (outputs[0] > 0.0).squeeze().cpu().numpy()
+                except Exception as e:
+                    print(f"⚠️ Stage 2 Prediction Error on label '{label}': {e}")
+                    masks_out.append(np.zeros((image.height, image.width), dtype=bool))
+                    scores_out.append(0.0)
 
-                # Ensure mask is exactly 2D (Height x Width)
-                if mask.ndim > 2:
-                    mask = mask[0]
+        except Exception as e:
+            print(f"⚠️ Stage 2 Setup Error for image: {e}")
+            for _ in labels:
+                 masks_out.append(np.zeros((image.height, image.width), dtype=bool))
+                 scores_out.append(0.0)
 
-                # SAM usually outputs IoU scores; default to 1.0 if not found
-                if hasattr(outputs, "iou_scores"):
-                    # Get the highest scoring mask score
-                    score = outputs.iou_scores.max().item() 
-                else:
-                    score = 1.0
+        finally:
+            self.predictor.reset_image()
+            torch.cuda.empty_cache()
+            gc.collect()
 
-                masks.append(mask)
-                scores.append(score)
-
-            except Exception as e:
-                print(f"⚠️ Stage 2 OOM/Error on label '{label}': {e}")
-                # Emit a blank boolean mask to keep the pipeline moving
-                blank_mask = np.zeros((image.height, image.width), dtype=bool)
-                masks.append(blank_mask)
-                scores.append(0.0)
-
-            finally:
-                # Per-label memory flush to prevent mid-image OOM spikes
-                torch.cuda.empty_cache()
-                gc.collect()
-
-        return masks, scores
+        return masks_out, scores_out
