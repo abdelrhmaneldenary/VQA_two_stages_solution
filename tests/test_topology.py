@@ -197,6 +197,24 @@ def test_part_to_whole_distant_containment_is_single(evaluator):
     assert pred == 1, f"Couch+pillow must be SINGLE; got Multiple (D_Score={score:.4f})"
 
 
+def test_text_skill_containment_distinct_labels_is_multiple(evaluator):
+    """
+    In TEXT skill mode, contained masks should not auto-absorb when labels are
+    lexically different (preserve OCR-style distinct strings).
+    """
+    H, W = 480, 640
+    parent = _make_rect_mask(H, W, 80, 420, 140, 500)
+    child = _make_rect_mask(H, W, 140, 360, 200, 450)
+    pred, score = evaluator.evaluate(
+        [parent, child],
+        anchor_points=[(320, 160), (320, 320)],
+        image_size=(W, H),
+        candidate_labels=["MARSHAK CREEK", "STEAK RUB"],
+        predicted_skill="TEXT",
+    )
+    assert pred == 0, f"TEXT containment with distinct labels must be MULTIPLE; got Single (D_Score={score:.4f})"
+
+
 # ---------------------------------------------------------------------------
 # Genuinely separate objects
 # ---------------------------------------------------------------------------
@@ -233,6 +251,32 @@ def test_backward_compat_no_anchors(evaluator):
 
     pred, score = evaluator.evaluate([car_mask, light_mask])
     assert pred == 0, f"Backward-compat: two separate masks should be MULTIPLE (D_Score={score:.4f})"
+
+
+def test_object_skill_dampens_divergence_score(evaluator):
+    """
+    OBJECT skill applies a 0.5x damping on final divergence to reduce false
+    MULTIPLE decisions from over-fragmented candidates.
+    """
+    H, W = 480, 640
+    car_mask = _make_rect_mask(H, W, 200, 460, 20, 280)
+    light_mask = _make_rect_mask(H, W, 30, 200, 500, 600)
+
+    _, score_text = evaluator.evaluate(
+        [car_mask, light_mask],
+        anchor_points=[(150, 330), (550, 115)],
+        image_size=(W, H),
+        candidate_labels=["car", "traffic light"],
+        predicted_skill="TEXT",
+    )
+    _, score_object = evaluator.evaluate(
+        [car_mask, light_mask],
+        anchor_points=[(150, 330), (550, 115)],
+        image_size=(W, H),
+        candidate_labels=["car", "traffic light"],
+        predicted_skill="OBJECT",
+    )
+    assert score_object == pytest.approx(score_text * 0.5, rel=1e-6)
 
 
 def test_single_mask_returns_single(evaluator):

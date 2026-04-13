@@ -171,7 +171,7 @@ def main():
             
             # 1. Semantics (Qwen) - Now running on GPU
             _model_to(stage1.model, "cuda:0") # Or cuda:1 depending on your setup
-            candidates, qwen_outputs, start_idx, end_idx, grid_h, grid_w = stage1.generate_candidates(
+            candidates, qwen_outputs, start_idx, end_idx, grid_h, grid_w, predicted_skill = stage1.generate_candidates(
                 img_path, item["question"], few_shot_context, num_beams=CONFIG["num_beams"], diversity_penalty=CONFIG["lambda_penalty"]
             )
             
@@ -202,6 +202,7 @@ def main():
                 anchor_points=anchor_points,
                 image_size=(raw_w, raw_h),
                 candidate_labels=candidate_labels,
+                predicted_skill=predicted_skill,
             )
             ground_truth = 1 if item.get("binary_label") == "single" else 0
             
@@ -216,6 +217,7 @@ def main():
             valid_masks = [m for m in final_masks if np.any(m)]
             
             print(f"   -> 🧠 Semantics: {[c[0] for c in candidates]}")
+            print(f"   -> 🎯 Skill    : {predicted_skill}")
             print(f"   -> 📐 Geometry : {len(valid_masks)}/{len(final_masks)} valid masks generated.")
             print(f"   -> ⚖️ Topology : D_Score: {d_score:.3f} | Pred: {pred_text} | True: {true_text}")
 
