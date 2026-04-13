@@ -69,6 +69,7 @@ class LatentBridge:
             if not semantic_tokens:
                 semantic_tokens = [str(candidate_text)]
                 
+            # --- FIXED INDENTATION STARTS HERE ---
             attn_grid_2d = self._extract_and_reshape_attention(
                 attentions_to_process, 
                 image_token_start, 
@@ -78,16 +79,26 @@ class LatentBridge:
                 seq_idx=seq_idx
             )
             
-    # --- THE PURE EPISTEMIC POINT ANCHOR ---
-            flat_idx = torch.argmax(attn_grid_2d)
+            # --- THE ATTENTION SINK DESTROYER (3x3 SMOOTHING) ---
+            # ViTs dump excess attention on 1-pixel corner artifacts. 
+            # We apply average pooling to dilute isolated spikes and 
+            # force the argmax to find the dense "center of mass".
+            smoothed_attn = F.avg_pool2d(
+                attn_grid_2d.unsqueeze(0).unsqueeze(0).to(torch.float32), 
+                kernel_size=3, 
+                stride=1, 
+                padding=1
+            ).squeeze()
+            
+            flat_idx = torch.argmax(smoothed_attn)
+            # ---------------------------------------------------
+            
             r = flat_idx // grid_w
             c = flat_idx % grid_w
             
-            # Calculate exact coordinate in raw pixel space
             point_x = int(((c.item() + 0.5) / grid_w) * orig_w)
             point_y = int(((r.item() + 0.5) / grid_h) * orig_h)
             
-            # Pass ONLY the raw tuple. Stage 2 will handle the tensor math.
             bimodal_tuples.append((str(candidate_text), (point_x, point_y)))
             
         return bimodal_tuples
