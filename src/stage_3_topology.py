@@ -3,6 +3,10 @@ import cv2
 import re
 
 class TopologicalEvaluator:
+    LABEL_STOPWORDS = {"a", "an", "the", "of", "on", "in", "for", "with", "and"}
+    SEMANTIC_JACCARD_THRESHOLD = 0.6
+    SEMANTIC_CONTAINMENT_THRESHOLD = 0.8
+
     def __init__(self, w1_ciou=0.4, w2_conflict=0.6, w3_anchor=0.5, threshold=0.045):
         print("🚀 Initializing VizWiz Anchor-Aware Topological Evaluator...")
         total_weight = w1_ciou + w2_conflict + w3_anchor
@@ -57,8 +61,7 @@ class TopologicalEvaluator:
         norm = self._normalize_label(text)
         if not norm:
             return set()
-        stop = {"a", "an", "the", "of", "on", "in", "for", "with", "and"}
-        return {tok for tok in norm.split() if tok and tok not in stop}
+        return {tok for tok in norm.split() if tok and tok not in self.LABEL_STOPWORDS}
 
     def _are_semantically_equivalent(self, label_a, label_b):
         ta = self._tokenize_label(label_a)
@@ -76,7 +79,7 @@ class TopologicalEvaluator:
         jaccard = len(inter) / len(ta.union(tb))
         containment = min(len(inter) / len(ta), len(inter) / len(tb))
         # Conservative lexical-equivalence rule for synonyms/aliases.
-        return jaccard >= 0.6 or containment >= 0.8
+        return jaccard >= self.SEMANTIC_JACCARD_THRESHOLD or containment >= self.SEMANTIC_CONTAINMENT_THRESHOLD
 
     def _calculate_anchor_separation(self, anchor_points, image_size):
         """

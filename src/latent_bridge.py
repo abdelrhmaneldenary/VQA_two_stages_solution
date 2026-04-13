@@ -4,6 +4,10 @@ import spacy
 from difflib import SequenceMatcher
 
 class LatentBridge:
+    SEMANTIC_JACCARD_THRESHOLD = 0.6
+    SEMANTIC_CONTAINMENT_THRESHOLD = 0.8
+    SEMANTIC_SEQUENCE_THRESHOLD = 0.9
+
     def __init__(self, logit_scale_factor=1.0, sam3_prompt_size=(256, 256)):
         print("🚀 Initializing Latent Bridge & SpaCy POS Tagger...")
         try:
@@ -62,8 +66,8 @@ class LatentBridge:
 
         # Conservative merge rule:
         # Require lexical overlap + shared noun head (or near-identical string)
-        return (shared_heads and (jaccard >= 0.6 or containment >= 0.8)) or (
-            shared_heads and seq_ratio >= 0.9
+        return (shared_heads and (jaccard >= self.SEMANTIC_JACCARD_THRESHOLD or containment >= self.SEMANTIC_CONTAINMENT_THRESHOLD)) or (
+            shared_heads and seq_ratio >= self.SEMANTIC_SEQUENCE_THRESHOLD
         )
 
     def _semantic_deduplicate_candidates(self, candidates_data):

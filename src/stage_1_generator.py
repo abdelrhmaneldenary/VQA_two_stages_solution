@@ -6,6 +6,8 @@ import ast
 import re
 
 class Stage1Generator:
+    GENERIC_BANLIST = {"object", "target", "item", "picture"}
+
     def __init__(self, model_id="Qwen/Qwen2-VL-2B-Instruct"):
         print(f"🚀 Loading Stage 1 Semantic Engine: {model_id}")
         
@@ -67,7 +69,6 @@ class Stage1Generator:
         if not decoded_text:
             return []
 
-        generic_banlist = {"object", "target", "item", "picture"}
         candidates = []
 
         # 1) Strict Python-list parse path
@@ -77,7 +78,7 @@ class Stage1Generator:
                 for item in parsed_list:
                     if isinstance(item, str):
                         clean = item.strip()
-                        if clean and clean.lower() not in generic_banlist:
+                        if clean and clean.lower() not in self.GENERIC_BANLIST:
                             candidates.append(clean)
                 if candidates:
                     return candidates
@@ -91,7 +92,7 @@ class Stage1Generator:
         )
         for hit in kv_text_hits:
             clean = hit.strip()
-            if clean and clean.lower() not in generic_banlist:
+            if clean and clean.lower() not in self.GENERIC_BANLIST:
                 candidates.append(clean)
         if candidates:
             return candidates
@@ -100,7 +101,7 @@ class Stage1Generator:
         quoted_hits = re.findall(r"""["']([^"']{1,80})["']""", decoded_text)
         for hit in quoted_hits:
             clean = hit.strip()
-            if clean and clean.lower() not in generic_banlist and not re.fullmatch(r"\d+", clean):
+            if clean and clean.lower() not in self.GENERIC_BANLIST and not re.fullmatch(r"\d+", clean):
                 candidates.append(clean)
         if candidates:
             return candidates
@@ -116,7 +117,7 @@ class Stage1Generator:
                 continue
             if not re.search(r"[a-zA-Z]", clean):
                 continue
-            if clean.lower() in generic_banlist:
+            if clean.lower() in self.GENERIC_BANLIST:
                 continue
             candidates.append(clean)
 
