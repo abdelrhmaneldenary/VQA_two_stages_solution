@@ -76,20 +76,16 @@ class LatentBridge:
                 seq_idx=seq_idx
             )
             
-            # --- THE EPISTEMIC POINT ANCHOR PIVOT ---
-            # 1. Find the 2D index of the absolute maximum confidence patch
+    # --- THE PURE EPISTEMIC POINT ANCHOR ---
             flat_idx = torch.argmax(attn_grid_2d)
             r = flat_idx // grid_w
             c = flat_idx % grid_w
             
-            # 2. Scale the patch grid coordinate back to the raw image resolution.
-            # We add +0.5 to mathematically target the center of the patch.
+            # Calculate exact coordinate in raw pixel space
             point_x = int(((c.item() + 0.5) / grid_w) * orig_w)
             point_y = int(((r.item() + 0.5) / grid_h) * orig_h)
             
-            # 3. Format exactly as the Hugging Face Processor expects: [[[x, y]]]
-            point_coords = [[[point_x, point_y]]]
-            
-            bimodal_tuples.append((str(candidate_text), point_coords))
+            # Pass ONLY the raw tuple. Stage 2 will handle the tensor math.
+            bimodal_tuples.append((str(candidate_text), (point_x, point_y)))
             
         return bimodal_tuples
