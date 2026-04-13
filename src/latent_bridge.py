@@ -47,7 +47,10 @@ class LatentBridge:
 
     def process_bimodal_tuples(self, candidates_data, outputs, image_token_start, image_token_end, grid_h, grid_w, raw_image_size):
         bimodal_tuples = []
-        
+        # Tracks which attention-grid cells have already been claimed by a
+        # prior candidate from the same beam sequence.  Keyed by seq_idx.
+        used_peaks = {}
+
         if isinstance(outputs, (list, tuple)):
             attentions_to_process = outputs
         elif hasattr(outputs, 'attentions'):
@@ -94,15 +97,44 @@ class LatentBridge:
             smoothed_attn[-1, :] = 0.0  # Bottom edge
             smoothed_attn[:, 0] = 0.0   # Left edge
             smoothed_attn[:, -1] = 0.0
-            
-            flat_idx = torch.argmax(smoothed_attn)
+
+            # --- ATTENTION PEAK SUPPRESSION ---
+            # When multiple candidates originate from the same beam (seq_idx),
+            # they share an identical attention map.  Without suppression every
+            # candidate would produce the same argmax anchor, causing SAM to
+            # generate identical masks and the NMS to incorrectly collapse all
+            # text labels into a single entry.
+            # We zero-out a window around each previously claimed peak so that
+            # the k-th candidate finds the k-th distinct hotspot.
+            # Suppression radius = 25% of the larger grid dimension.
+            # This is wide enough to prevent two candidates from locking
+            # onto the same broad attention peak while still allowing
+            # distinct hotspots within adjacent quadrants to remain
+            # independently discoverable.
+            suppression_radius = max(1, max(grid_h, grid_w) // 4)
+            suppressed_attn = smoothed_attn.clone()
+            for prev_r, prev_c in used_peaks.get(seq_idx, []):
+                r_lo = max(0, prev_r - suppression_radius)
+                r_hi = min(grid_h, prev_r + suppression_radius + 1)
+                c_lo = max(0, prev_c - suppression_radius)
+                c_hi = min(grid_w, prev_c + suppression_radius + 1)
+                suppressed_attn[r_lo:r_hi, c_lo:c_hi] = 0.0
+            # -----------------------------------
+
+            flat_idx = torch.argmax(suppressed_attn)
             # ---------------------------------------------------
             
-            r = flat_idx // grid_w
-            c = flat_idx % grid_w
+            r = (flat_idx // grid_w).item()
+            c = (flat_idx % grid_w).item()
+
+            # Register this peak so subsequent same-beam candidates are
+            # directed to a different spatial location
+            if seq_idx not in used_peaks:
+                used_peaks[seq_idx] = []
+            used_peaks[seq_idx].append((r, c))
             
-            point_x = int(((c.item() + 0.5) / grid_w) * orig_w)
-            point_y = int(((r.item() + 0.5) / grid_h) * orig_h)
+            point_x = int(((c + 0.5) / grid_w) * orig_w)
+            point_y = int(((r + 0.5) / grid_h) * orig_h)
             
             bimodal_tuples.append((str(candidate_text), (point_x, point_y)))
             

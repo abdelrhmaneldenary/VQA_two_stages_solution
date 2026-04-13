@@ -24,6 +24,7 @@ CONFIG = {
     # Stage 3 Parameters
     "w1_ciou": 0.4,
     "w2_conflict": 0.6,
+    "w3_anchor": 0.5,
     "threshold": 0.045, 
     
     # Paths

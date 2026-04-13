@@ -137,7 +137,7 @@ def main():
     stage1 = Stage1Generator(model_id=CONFIG["model_s1_path"])  
     bridge = LatentBridge() 
     stage2 = Stage2Segmentor(model_id=CONFIG["model_s2_path"])
-    stage3 = TopologicalEvaluator(w1_ciou=CONFIG["w1_ciou"], w2_conflict=CONFIG["w2_conflict"], threshold=CONFIG["threshold"])
+    stage3 = TopologicalEvaluator(w1_ciou=CONFIG["w1_ciou"], w2_conflict=CONFIG["w2_conflict"], w3_anchor=CONFIG["w3_anchor"], threshold=CONFIG["threshold"])
 
     y_true, y_pred, y_scores, sources = [], [], [], []
     saved_viz_count = 0
@@ -179,9 +179,12 @@ def main():
             # 3. Geometry (SAM 3) - Move to GPU now
             stage2.model.to("cuda:0") 
             final_masks, _ = stage2.generate_masks(img_path, bimodal_tuples)
-            
+
+            # Extract anchor points from bimodal_tuples for anchor-aware Stage 3
+            anchor_points = [pt for _, pt in bimodal_tuples]
+
             # 4. Topology Evaluation (CPU Bound)
-            prediction, d_score = stage3.evaluate(final_masks)
+            prediction, d_score = stage3.evaluate(final_masks, anchor_points=anchor_points, image_size=(raw_w, raw_h))
             ground_truth = 1 if item.get("binary_label") == "single" else 0
             
             y_pred.append(prediction)
