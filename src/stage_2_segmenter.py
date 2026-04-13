@@ -1,5 +1,7 @@
 import os
 import torch
+import numpy as np
+from PIL import Image
 from transformers import AutoModel, AutoProcessor # Using AutoModel here
 
 class Stage2Segmenter:
@@ -19,7 +21,7 @@ class Stage2Segmenter:
         self.model = AutoModel.from_pretrained(
             local_path,
             device_map="auto",
-            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32, 
+            dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
             trust_remote_code=True,
             local_files_only=True if os.path.exists(model_id) else False
         )
@@ -100,8 +102,22 @@ class Stage2Segmenter:
             inputs = self.processor(text=label, images=image, return_tensors="pt")
             inputs = {k: v.to(self.model.device) if torch.is_tensor(v) else v for k, v in inputs.items()}
 
-            with torch.no_grad():
-                generated = self.model.generate(**inputs, max_new_tokens=16)
+            try:
+                with torch.no_grad():
+                    generated = self.model.generate(
+                        **inputs,
+                        max_new_tokens=8,
+                        do_sample=False,
+                        use_cache=False,
+                    )
+            except RuntimeError as err:
+                if "out of memory" in str(err).lower():
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    masks.append(self._blank_mask(image))
+                    scores.append(0.0)
+                    continue
+                raise
 
             mask, score = self._mask_from_generated(generated, inputs, image)
             masks.append(mask)

@@ -21,7 +21,7 @@ class Stage1Generator:
         dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
             local_path,
-            torch_dtype=dtype,
+            dtype=dtype,
             device_map="auto",
             trust_remote_code=True,
             local_files_only=True if os.path.exists(model_id) else False
