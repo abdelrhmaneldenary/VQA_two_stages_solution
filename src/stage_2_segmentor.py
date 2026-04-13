@@ -28,8 +28,11 @@ class Stage2Segmentor:
 
         self.model.eval()
 
-    def generate_masks(self, image_path, bimodal_tuples):
-        raw_image = Image.open(image_path).convert("RGB")
+    def generate_masks(self, image_or_path, bimodal_tuples):
+        if isinstance(image_or_path, Image.Image):
+            raw_image = image_or_path if image_or_path.mode == "RGB" else image_or_path.convert("RGB")
+        else:
+            raw_image = Image.open(image_or_path).convert("RGB")
         orig_w, orig_h = raw_image.size
         
         # --- THE VRAM SHIELD: DYNAMIC RESOLUTION CAPPING ---
@@ -94,6 +97,6 @@ class Stage2Segmentor:
             
             # Aggressive Garbage Collection
             del inputs, outputs, point_tensor, label_tensor
-            torch.cuda.empty_cache()
 
+        torch.cuda.empty_cache()
         return final_masks, mask_scores
