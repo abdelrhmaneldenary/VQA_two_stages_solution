@@ -15,7 +15,6 @@ class Stage1Generator:
             bnb_4bit_compute_dtype=torch.bfloat16
         )
 
-        # --- THE FIX: ADD TRUST_REMOTE_CODE HERE ---
         self.processor = AutoProcessor.from_pretrained(
             model_id,
             trust_remote_code=True
@@ -26,28 +25,29 @@ class Stage1Generator:
             quantization_config=bnb_config,
             device_map="cuda:1", 
             attn_implementation="eager",
-            trust_remote_code=True  # <--- AND HERE
+            trust_remote_code=True  
         )
         self.model.eval()
-        # -------------------------------------------
 
         self.model.config.output_attentions = True
 
         # ==========================================
-        # 🧠 THE CLEAN ATTENTION TAP
+        # 🧠 THE CLEAN ATTENTION TAP (FIXED)
         # ==========================================
-        target_layer_module = None
-        target_layer_name = ""
-        
+        attn_modules = []
         for name, module in self.model.named_modules():
             if name.endswith(".self_attn"):
-                target_layer_module = module
-                target_layer_name = name
+                attn_modules.append((name, module))
                 
-        if target_layer_module is None:
-            raise AttributeError("❌ Could not dynamically find a 'self_attn' layer!")
+        if not attn_modules:
+            raise AttributeError("❌ Could not dynamically find any 'self_attn' layers!")
             
-        print(f"✅ Tapping clean Eager layer: {target_layer_name}")
+        # Target an upper-middle layer (75% depth) instead of the final text-generation layer.
+        # This guarantees we capture crisp spatial reasoning before it diffuses into pure semantics.
+        target_idx = int(len(attn_modules) * 0.75)
+        target_layer_name, target_layer_module = attn_modules[target_idx]
+            
+        print(f"✅ Tapping crisp spatial Eager layer: {target_layer_name} (Layer {target_idx}/{len(attn_modules)})")
 
         self.captured_attentions = []
         def hook_fn(module, input, output):
@@ -57,18 +57,13 @@ class Stage1Generator:
         self.hook = target_layer_module.register_forward_hook(hook_fn)
         # ==========================================
 
-
-
     def generate_candidates(self, image_path, question, context_string, num_beams=4, diversity_penalty=0.5):
         """
         Executes Diverse Beam Search and extracts semantic candidates.
         Includes an aggressive parser to prevent '0/1' geometric failures.
         """
-        # Reset attention hook storage for this specific image run
         self.captured_attentions = []
 
-        # 1. Rigorous System Prompting
-        # We force the model into 'List Mode' to simplify parsing.
         prompt_text = (
             f"{context_string}\n"
             f"Task: Answer the question by listing all distinct, concrete, physical nouns visible in the image.\n"
@@ -86,17 +81,21 @@ class Stage1Generator:
             ]
         }]
 
-        # 2. Tokenization and Index Tracking
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         image_inputs, video_inputs = process_vision_info(messages)
         inputs = self.processor(text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt").to(self.model.device)
 
-        # Calculate exactly where the image tokens live in the sequence
+        # --- THE ASPECT RATIO FIX ---
+        # Capture the true geometric shape of the image patches before passing to the bridge
+        image_grid_thw = inputs["image_grid_thw"][0] # Shape: (Time, Height, Width)
+        grid_h = image_grid_thw[1].item()
+        grid_w = image_grid_thw[2].item()
+        # -----------------------------
+
         input_ids = inputs["input_ids"][0].cpu()
         image_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
         image_indices = (input_ids == image_token_id).nonzero(as_tuple=True)[0]
         
-        # These indices tell the Latent Bridge which part of the attention matrix to 'crop'
         start_idx = image_indices[0].item()
         end_idx = image_indices[-1].item() + 1
 
@@ -104,8 +103,8 @@ class Stage1Generator:
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=30,
-                custom_generate="transformers-community/group-beam-search", # <--- ADD THIS BACK
-                trust_remote_code=True,                                     # <--- ADD THIS BACK
+                custom_generate="transformers-community/group-beam-search", 
+                trust_remote_code=True,                                     
                 num_beams=num_beams,
                 num_beam_groups=num_beams,         
                 diversity_penalty=diversity_penalty, 
@@ -119,31 +118,24 @@ class Stage1Generator:
         if not self.captured_attentions:
             raise ValueError("❌ Hook failed to capture attention. Ensure eager mode is active.")
         
-        # Wrap the last captured attention tensor for the Latent Bridge
         final_bridge_attentions = [(self.captured_attentions[-1],)]
 
-        # 4. The Aggressive Parser (Fixes the 0/1 Valid Masks Bug)
         candidates_data = [] 
         
         for seq_idx in range(num_beams):
-            # Slice off the prompt to get only the new tokens
             generated_ids = outputs.sequences[seq_idx][len(inputs["input_ids"][0]):]
             decoded_text = self.processor.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
             
-            # Step A: Attempt clean Python list evaluation
             try:
                 parsed_list = ast.literal_eval(decoded_text)
                 if isinstance(parsed_list, list):
                     for item in parsed_list:
-                        # Filter out generic noise that Qwen might still output
                         if item.lower() not in ["object", "target", "item", "picture"]:
                             candidates_data.append((item.strip(), seq_idx))
-                    continue # Successfully parsed this beam
+                    continue 
             except:
-                pass # Fallback to manual cleaning if ast fails
+                pass 
                 
-            # Step B: Regex-style manual cleaning fallback
-            # This strips [ ] ' " and splits by commas to recover the nouns
             clean_text = decoded_text.replace("[", "").replace("]", "").replace("'", "").replace('"', "")
             manual_items = [c.strip() for c in clean_text.split(",") if c.strip()]
             
@@ -151,8 +143,8 @@ class Stage1Generator:
                 if item.lower() not in ["object", "target", "item", "picture"]:
                     candidates_data.append((item, seq_idx))
 
-        # Clean up memory
         del inputs
         torch.cuda.empty_cache()
         
-        return candidates_data, final_bridge_attentions, start_idx, end_idx
+        # Return the true physical constraints (grid_h, grid_w) alongside the sequences
+        return candidates_data, final_bridge_attentions, start_idx, end_idx, grid_h, grid_w

@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from PIL import Image
 from transformers import Sam3Processor, Sam3Model
+import inspect
 
 class Stage2Segmentor:
     def __init__(self, model_id=None):
@@ -15,14 +16,12 @@ class Stage2Segmentor:
             )
             
             # --- THE MULTI-GPU FIX ---
-            # We remove device_map="auto" so the model doesn't get split across 2 GPUs.
-            # Instead, we load it into RAM and manually move the whole thing to cuda:0.
             self.model = Sam3Model.from_pretrained(
                 model_id,
                 torch_dtype=torch.bfloat16,
                 local_files_only=True,   
                 trust_remote_code=True
-            ).to("cuda:0") # Force entire model onto GPU 0
+            ).to("cuda:0") 
             # -------------------------
             
         except Exception as e:
@@ -30,6 +29,30 @@ class Stage2Segmentor:
             raise e
 
         self.model.eval()
+
+        # ==========================================
+        # 🔍 THE KWARG DISCOVERY PROTOCOL
+        # ==========================================
+        # Hugging Face frequently renames kwargs (mask_input vs input_masks vs mask_inputs).
+        # We dynamically inspect the loaded model's forward pass to find the exact key it requires.
+        forward_params = inspect.signature(self.model.forward).parameters
+        self.valid_mask_key = None
+        
+        for possible_key in ["mask_inputs", "input_masks", "mask_input", "dense_prompt"]:
+            if possible_key in forward_params:
+                self.valid_mask_key = possible_key
+                break
+                
+        if self.valid_mask_key:
+            print(f"✅ Discovered dense mask kwarg: '{self.valid_mask_key}'")
+        elif "kwargs" in forward_params:
+            print("⚠️ Explicit mask kwarg hidden. Relying on **kwargs fallback using 'mask_inputs'")
+            self.valid_mask_key = "mask_inputs" # Default Meta fallback
+        else:
+            raise ValueError("❌ Model signature does not accept dense masks or kwargs! Architecture mismatch.")
+        # ==========================================
+
+
     def generate_masks(self, image_path, bimodal_tuples):
         raw_image = Image.open(image_path).convert("RGB")
         final_masks = []
@@ -37,20 +60,23 @@ class Stage2Segmentor:
         
         for candidate_text, dense_logit_prior in bimodal_tuples:
             
-            # 1. Let the processor handle ONLY the image and text natively
+            # 1. Standard Processor Encoding (Image + Text)
             inputs = self.processor(
                 images=raw_image,
                 text=candidate_text,
                 return_tensors="pt"
             ).to(self.model.device, dtype=torch.bfloat16)
 
-            # 2. THE DIRECT INJECTION (Bypassing the Processor)
-            # Format to [Batch, Channels, H, W] -> [1, 1, 256, 256]
-            dense_prompt = dense_logit_prior.unsqueeze(0).unsqueeze(0).to(self.model.device, dtype=torch.bfloat16)
+            # 2. THE DIRECT INJECTION
+            # The Latent Bridge tensor is already perfectly padded and clamped.
+            # Format: [Batch, Channels, H, W] -> [1, 1, 256, 256]
+            dense_prompt = dense_logit_prior.unsqueeze(0).unsqueeze(0).to(
+                device=self.model.device, 
+                dtype=torch.bfloat16
+            )
             
-            # Manually inject the dense prior straight into the model's forward arguments.
-            # Meta's SAM architecture explicitly looks for "mask_input" in the kwargs.
-            inputs["mask_input"] = dense_prompt
+            # Inject using the dynamically discovered key
+            inputs[self.valid_mask_key] = dense_prompt
 
             with torch.no_grad():
                 outputs = self.model(**inputs)
@@ -67,6 +93,7 @@ class Stage2Segmentor:
                 final_masks.append(results['masks'][best_idx].cpu().numpy())
                 mask_scores.append(results['scores'][best_idx].item())
             else:
+                # If SAM still rejects it, output a blank mask safely
                 final_masks.append(np.zeros((raw_image.size[1], raw_image.size[0])))
                 mask_scores.append(0.0)
             
