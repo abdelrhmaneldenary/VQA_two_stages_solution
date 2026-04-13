@@ -56,8 +56,7 @@ class Stage1Generator:
         if not match:
             return 1
         value = int(match.group())
-        value = max(1, value)
-        return min(value, max_count)
+        return max(1, min(value, max_count))
 
     def _extract_labels(self, text):
         text = (text or "").strip()

@@ -36,7 +36,7 @@ def classify_from_masks(masks, threshold=0.5):
     return prediction, max_iou
 
 
-def log_experiment(metrics, run_id, csv_path="experiment_tracker.csv"):
+def log_experiment(metrics, run_id, timestamp, csv_path="experiment_tracker.csv"):
     file_exists = os.path.isfile(csv_path)
     with open(csv_path, mode="a", newline="") as f:
         writer = csv.writer(f)
@@ -45,7 +45,7 @@ def log_experiment(metrics, run_id, csv_path="experiment_tracker.csv"):
         writer.writerow(
             [
                 run_id,
-                datetime.now().strftime("%Y-%m-%d"),
+                timestamp,
                 f"{metrics['f1']:.2f}",
                 f"{metrics['precision']:.2f}",
                 f"{metrics['recall']:.2f}",
@@ -55,6 +55,7 @@ def log_experiment(metrics, run_id, csv_path="experiment_tracker.csv"):
 
 def main():
     print(f"🚀 Running: {CONFIG['run_id']}")
+    run_date = datetime.now().strftime("%Y-%m-%d")
 
     data_loader = VQADatasetLoader(CONFIG["dataset_dir"])
     val_dataset = data_loader.load_and_balance(split="val", force_balance=False)
@@ -103,7 +104,7 @@ def main():
         f"Recall: {metrics['recall']:.2f}%"
     )
 
-    log_experiment(metrics, CONFIG["run_id"])
+    log_experiment(metrics, CONFIG["run_id"], run_date)
 
 
 if __name__ == "__main__":
