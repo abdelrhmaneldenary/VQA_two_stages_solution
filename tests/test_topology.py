@@ -73,6 +73,22 @@ def test_ocr_same_mask_distant_anchors_is_multiple(evaluator):
     )
 
 
+def test_ocr_same_mask_dissimilar_labels_without_anchors_is_multiple(evaluator):
+    """
+    True-multiple OCR case must still be MULTIPLE even without anchor inputs:
+    identical geometry + lexically distinct labels should survive dedup and be
+    separated by semantic divergence in D_Score.
+    """
+    H, W = 480, 640
+    bottle_mask = _make_rect_mask(H, W, 100, 380, 220, 420)
+    pred, score = evaluator.evaluate(
+        [bottle_mask.copy(), bottle_mask.copy()],
+        candidate_labels=["Marshak Creek", "Steak Rub"],
+    )
+    assert pred == 0, f"OCR dissimilar labels must be MULTIPLE; got Single (D_Score={score:.4f})"
+    assert score > evaluator.threshold
+
+
 def test_ocr_same_mask_close_anchors_is_single(evaluator):
     """
     If both text candidates *and* their anchors are essentially collocated
@@ -105,6 +121,16 @@ def test_synonym_same_mask_distant_anchors_is_single(evaluator):
         candidate_labels=["Nokia phone", "Nokia mobile phone"],
     )
     assert pred == 1, f"Synonym case must be SINGLE; got Multiple (D_Score={score:.4f})"
+
+
+def test_synonym_same_mask_without_anchors_is_single(evaluator):
+    H, W = 480, 640
+    phone_mask = _make_rect_mask(H, W, 120, 370, 240, 430)
+    pred, score = evaluator.evaluate(
+        [phone_mask.copy(), phone_mask.copy()],
+        candidate_labels=["Nokia phone", "mobile phone"],
+    )
+    assert pred == 1, f"Synonym-no-anchor case must be SINGLE; got Multiple (D_Score={score:.4f})"
 
 
 # ---------------------------------------------------------------------------

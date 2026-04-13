@@ -1,18 +1,26 @@
 import numpy as np
 import cv2
 import re
+from difflib import SequenceMatcher
 
 class TopologicalEvaluator:
     LABEL_STOPWORDS = {"a", "an", "the", "of", "on", "in", "for", "with", "and", "at", "by", "to", "from", "or", "but", "as", "if"}
-    SEMANTIC_JACCARD_THRESHOLD = 0.6
-    SEMANTIC_CONTAINMENT_THRESHOLD = 0.8
+    SEMANTIC_JACCARD_THRESHOLD = 0.55
+    SEMANTIC_CONTAINMENT_THRESHOLD = 0.5
+    SEMANTIC_CHAR_SIM_THRESHOLD = 0.78
+    ABSORB_MIN_IOM = 0.85
+    SAME_MASK_IOU = 0.98
+    STRONG_CONTAINMENT_IOM = 0.98
+    STRONG_CONTAINMENT_AREA_RATIO = 0.6
 
-    def __init__(self, w1_ciou=0.4, w2_conflict=0.6, w3_anchor=0.5, threshold=0.045):
-        print("🚀 Initializing VizWiz Anchor-Aware Topological Evaluator...")
-        total_weight = w1_ciou + w2_conflict + w3_anchor
+    def __init__(self, w1_ciou=0.4, w2_conflict=0.6, w3_anchor=0.5, w3_semantic=None, threshold=0.045):
+        print("🚀 Initializing VizWiz Geometry+Semantic Topological Evaluator...")
+        if w3_semantic is None:
+            w3_semantic = w3_anchor  # Backward compatibility with existing config key
+        total_weight = w1_ciou + w2_conflict + w3_semantic
         self.W1 = w1_ciou / total_weight
         self.W2 = w2_conflict / total_weight
-        self.W3 = w3_anchor / total_weight
+        self.W3 = w3_semantic / total_weight
         self.threshold = threshold
 
     def _fill_holes(self, mask):
@@ -64,6 +72,10 @@ class TopologicalEvaluator:
         return {tok for tok in norm.split() if tok and tok not in self.LABEL_STOPWORDS}
 
     def _are_semantically_equivalent(self, label_a, label_b):
+        score = self._semantic_similarity(label_a, label_b)
+        if score >= self.SEMANTIC_CHAR_SIM_THRESHOLD:
+            return True
+
         ta = self._tokenize_label(label_a)
         tb = self._tokenize_label(label_b)
         if not ta or not tb:
@@ -78,8 +90,29 @@ class TopologicalEvaluator:
 
         jaccard = len(inter) / len(ta.union(tb))
         containment = min(len(inter) / len(ta), len(inter) / len(tb))
-        # Lexical-equivalence rule for synonyms/aliases.
+        # Lexical-equivalence rule for synonyms/aliases, using only lightweight string math.
         return jaccard >= self.SEMANTIC_JACCARD_THRESHOLD or containment >= self.SEMANTIC_CONTAINMENT_THRESHOLD
+
+    def _semantic_similarity(self, label_a, label_b):
+        a = self._normalize_label(label_a)
+        b = self._normalize_label(label_b)
+        if not a or not b:
+            return 0.0
+
+        if a == b:
+            return 1.0
+
+        ta = self._tokenize_label(a)
+        tb = self._tokenize_label(b)
+        if ta and tb:
+            inter = len(ta.intersection(tb))
+            union = len(ta.union(tb))
+            jaccard = inter / union if union > 0 else 0.0
+        else:
+            jaccard = 0.0
+
+        char_ratio = SequenceMatcher(None, a, b).ratio()
+        return max(char_ratio, jaccard)
 
     def _calculate_anchor_separation(self, anchor_points, image_size):
         """
@@ -126,6 +159,20 @@ class TopologicalEvaluator:
         conflict_ratio = (global_hull_area - actual_mask_area) / global_hull_area
         return max(0.0, min(1.0, conflict_ratio))
 
+    def _calculate_semantic_divergence(self, labels):
+        if labels is None or len(labels) < 2:
+            return 0.0
+
+        sims = []
+        for i in range(len(labels)):
+            for j in range(i + 1, len(labels)):
+                sims.append(self._semantic_similarity(labels[i], labels[j]))
+
+        if not sims:
+            return 0.0
+        avg_sim = sum(sims) / len(sims)
+        return 1.0 - avg_sim
+
     def evaluate(self, masks, anchor_points=None, image_size=None, candidate_labels=None):
         if len(masks) < 2:
             return 1, 0.0
@@ -147,18 +194,13 @@ class TopologicalEvaluator:
         if len(valid_masks) < 2:
             return 1, 0.0
 
-        # --- SOLID-PIXEL ANCHOR-AWARE SEMANTIC NMS ---
+        # --- SOLID-PIXEL GEOMETRY+SEMANTIC NMS ---
         # Fill internal holes so that parent objects (e.g. couch) absorb their
-        # children (e.g. pillow) correctly.  However, we add a spatial guard:
-        # two candidates whose anchor points are far apart represent physically
-        # separate entities (e.g. two text labels on a bottle) and must never
-        # be absorbed into each other even when SAM happened to return the same
-        # enclosing-object mask for both anchor points.
+        # children (e.g. pillow) correctly.
+        # If two masks are almost identical, absorb only when labels are lexically
+        # equivalent; otherwise keep both so OCR-like distinct strings survive.
         solid_masks = [self._fill_holes(m) for m in valid_masks]
         areas = [np.sum(m) for m in solid_masks]
-
-        # Pre-compute image diagonal once for the anchor-distance guard
-        diagonal = np.hypot(image_size[0], image_size[1]) if image_size is not None else None
 
         sorted_indices = np.argsort(areas)[::-1]
         kept_indices = []
@@ -174,41 +216,34 @@ class TopologicalEvaluator:
                 mask_parent = solid_masks[j]
 
                 iom = self._calculate_pixel_iom(mask_parent, mask_child)
+                if iom < self.ABSORB_MIN_IOM:
+                    continue
 
-                if iom >= 0.85:
-                    iou = self._calculate_pixel_iou(mask_parent, mask_child)
-                    area_parent = areas[j]
-                    area_child = areas[i]
-                    area_ratio = min(area_parent, area_child) / max(area_parent, area_child)
+                iou = self._calculate_pixel_iou(mask_parent, mask_child)
+                area_parent = areas[j]
+                area_child = areas[i]
+                area_ratio = min(area_parent, area_child) / max(area_parent, area_child)
+                same_shape = iou >= self.SAME_MASK_IOU
+                strong_containment = (
+                    iom >= self.STRONG_CONTAINMENT_IOM and area_ratio <= self.STRONG_CONTAINMENT_AREA_RATIO
+                )
+                semantic_match = (
+                    self._are_semantically_equivalent(valid_labels[i], valid_labels[j])
+                    if valid_labels is not None
+                    else True
+                )
 
-                    same_shape = iou >= 0.98
-                    strong_containment = iom >= 0.98 and area_ratio <= 0.6
-                    semantic_match = (
-                        self._are_semantically_equivalent(valid_labels[i], valid_labels[j])
-                        if valid_labels is not None
-                        else False
-                    )
-
-                    # Bypass anchor-distance guard when:
-                    # 1) Same geometry + semantically equivalent labels (synonyms)
-                    # 2) Very strong containment with large size mismatch (part-to-whole)
-                    if (same_shape and semantic_match) or strong_containment:
-                        is_absorbed = True
-                        break
-
-                    # Anchor-aware guard: if the two candidates point to
-                    # spatially distant regions, they represent distinct
-                    # entities (e.g. separate text labels printed on the
-                    # same physical object).  Skip absorption in that case.
-                    if valid_anchors is not None and diagonal is not None and diagonal > 0:
-                        ax, ay = valid_anchors[i]
-                        bx, by = valid_anchors[j]
-                        sep = np.hypot(ax - bx, ay - by) / diagonal
-                        if sep > 0.15:
-                            continue  # Spatially separate — do NOT absorb
-
+                # Part-to-whole should always absorb when containment is near-complete.
+                if strong_containment:
                     is_absorbed = True
                     break
+
+                # Near-identical geometry: absorb only when labels are equivalent.
+                if same_shape:
+                    if semantic_match:
+                        is_absorbed = True
+                        break
+                    continue
 
             if not is_absorbed:
                 kept_indices.append(i)
@@ -219,6 +254,11 @@ class TopologicalEvaluator:
         final_anchors = (
             [valid_anchors[idx] for idx in kept_indices]
             if valid_anchors is not None
+            else None
+        )
+        final_labels = (
+            [valid_labels[idx] for idx in kept_indices]
+            if valid_labels is not None
             else None
         )
         # -------------------------------------------------------
@@ -238,16 +278,13 @@ class TopologicalEvaluator:
 
         avg_overlap = overlap_sum / pairs if pairs > 0 else 0.0
         conflict_ratio = self._calculate_conflict_ratio(final_masks)
+        semantic_divergence = self._calculate_semantic_divergence(final_labels)
 
-        d_score = (self.W1 * (1.0 - avg_overlap)) + (self.W2 * conflict_ratio)
-
-        # Anchor-separation boost: surviving candidates whose spatial anchors
-        # are spread far apart signal that they represent genuinely distinct
-        # scene elements even when their SAM masks have high pixel overlap
-        # (the classic OCR / text-label failure mode).
-        if final_anchors is not None and image_size is not None and len(final_anchors) >= 2:
-            anchor_sep = self._calculate_anchor_separation(final_anchors, image_size)
-            d_score += self.W3 * anchor_sep
+        d_score = (
+            (self.W1 * (1.0 - avg_overlap))
+            + (self.W2 * conflict_ratio)
+            + (self.W3 * semantic_divergence)
+        )
 
         classification = 0 if d_score >= self.threshold else 1
         return classification, d_score
