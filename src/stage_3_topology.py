@@ -179,7 +179,7 @@ class TopologicalEvaluator:
                     iou = self._calculate_pixel_iou(mask_parent, mask_child)
                     area_parent = areas[j]
                     area_child = areas[i]
-                    area_ratio = (min(area_parent, area_child) / max(area_parent, area_child)) if max(area_parent, area_child) > 0 else 0.0
+                    area_ratio = min(area_parent, area_child) / max(area_parent, area_child)
 
                     same_shape = iou >= 0.98
                     strong_containment = iom >= 0.98 and area_ratio <= 0.6

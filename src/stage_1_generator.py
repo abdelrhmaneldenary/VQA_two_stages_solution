@@ -101,7 +101,7 @@ class Stage1Generator:
         quoted_hits = re.findall(r"""["']([^"']{1,80})["']""", decoded_text)
         for hit in quoted_hits:
             clean = hit.strip()
-            if clean and clean.lower() not in self.GENERIC_BANLIST and not re.fullmatch(r"\d+", clean):
+            if clean and clean.lower() not in self.GENERIC_BANLIST and not clean.isdigit():
                 candidates.append(clean)
         if candidates:
             return candidates

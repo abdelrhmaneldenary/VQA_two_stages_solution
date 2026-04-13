@@ -58,16 +58,14 @@ class LatentBridge:
         shared_heads = heads_a.intersection(heads_b)
         intersection = tokens_a.intersection(tokens_b)
         jaccard = len(intersection) / len(tokens_a.union(tokens_b))
-        containment = min(
-            len(intersection) / max(len(tokens_a), 1),
-            len(intersection) / max(len(tokens_b), 1),
-        )
+        containment = min(len(intersection) / len(tokens_a), len(intersection) / len(tokens_b))
         seq_ratio = SequenceMatcher(None, norm_a, norm_b).ratio()
 
         # Conservative merge rule:
         # Require lexical overlap + shared noun head (or near-identical string)
-        return (shared_heads and (jaccard >= self.SEMANTIC_JACCARD_THRESHOLD or containment >= self.SEMANTIC_CONTAINMENT_THRESHOLD)) or (
-            shared_heads and seq_ratio >= self.SEMANTIC_SEQUENCE_THRESHOLD
+        return shared_heads and (
+            (jaccard >= self.SEMANTIC_JACCARD_THRESHOLD or containment >= self.SEMANTIC_CONTAINMENT_THRESHOLD)
+            or seq_ratio >= self.SEMANTIC_SEQUENCE_THRESHOLD
         )
 
     def _semantic_deduplicate_candidates(self, candidates_data):
