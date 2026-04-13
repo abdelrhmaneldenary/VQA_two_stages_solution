@@ -262,7 +262,7 @@ def test_object_skill_dampens_divergence_score(evaluator):
     car_mask = _make_rect_mask(H, W, 200, 460, 20, 280)
     light_mask = _make_rect_mask(H, W, 30, 200, 500, 600)
 
-    _, score_text = evaluator.evaluate(
+    _, score_count = evaluator.evaluate(
         [car_mask, light_mask],
         anchor_points=[(150, 330), (550, 115)],
         image_size=(W, H),
@@ -276,7 +276,40 @@ def test_object_skill_dampens_divergence_score(evaluator):
         candidate_labels=["car", "traffic light"],
         predicted_skill="OBJECT",
     )
-    assert score_object == pytest.approx(score_text * 0.5, rel=1e-6)
+    assert score_object == pytest.approx(
+        score_count * evaluator.OBJECT_DAMPING_FACTOR, rel=1e-6
+    )
+
+
+def test_object_skill_damping_can_flip_decision():
+    """
+    With a tighter threshold, OBJECT damping can convert a borderline MULTIPLE
+    decision into SINGLE.
+    """
+    evaluator = TopologicalEvaluator(w1_ciou=0.4, w2_conflict=0.6, w3_anchor=0.5, threshold=0.50)
+    H, W = 480, 640
+    left_obj = _make_rect_mask(H, W, 120, 330, 70, 260)
+    right_obj = _make_rect_mask(H, W, 130, 340, 360, 560)
+
+    pred_count, score_count = evaluator.evaluate(
+        [left_obj, right_obj],
+        anchor_points=[(170, 225), (460, 235)],
+        image_size=(W, H),
+        candidate_labels=["car", "traffic light"],
+        predicted_skill="COUNT",
+    )
+    pred_object, score_object = evaluator.evaluate(
+        [left_obj, right_obj],
+        anchor_points=[(170, 225), (460, 235)],
+        image_size=(W, H),
+        candidate_labels=["car", "traffic light"],
+        predicted_skill="OBJECT",
+    )
+    assert pred_count == 0
+    assert pred_object == 1
+    assert score_object == pytest.approx(
+        score_count * evaluator.OBJECT_DAMPING_FACTOR, rel=1e-6
+    )
 
 
 def test_single_mask_returns_single(evaluator):

@@ -5,14 +5,18 @@ import math
 from difflib import SequenceMatcher
 
 class TopologicalEvaluator:
+    """Skill-aware topology evaluator using a simple 3-rule IoU/IoM hierarchy."""
     LABEL_STOPWORDS = {"a", "an", "the", "of", "on", "in", "for", "with", "and", "at", "by", "to", "from", "or", "but", "as", "if"}
     SEMANTIC_JACCARD_THRESHOLD = 0.55  # token overlap for alias-like phrases
     SEMANTIC_CONTAINMENT_THRESHOLD = 0.5  # "nokia phone" vs "mobile phone" style containment
     SEMANTIC_CHAR_SIM_THRESHOLD = 0.78  # high char-level similarity for near-duplicate strings
+    # Keep containment permissive to collapse part-to-whole fragments early.
     ABSORB_MIN_IOM = 0.60  # rule-1 containment trigger
+    # IoU>=0.90 follows the strong dedup baseline used in high-performing pipelines.
     SAME_MASK_IOU = 0.90  # rule-2 identical geometry gate
     TEXT_ABSORB_SIM_THRESHOLD = 0.70
     DUP_TEXT_ANCHOR_SEP_THRESHOLD = 0.15  # keep both if duplicate text is spatially far
+    OBJECT_DAMPING_FACTOR = 0.5
 
     def __init__(self, w1_ciou=0.4, w2_conflict=0.6, w3_anchor=0.5, w3_semantic=None, threshold=0.045):
         print("🚀 Initializing VizWiz Geometry+Semantic Topological Evaluator...")
@@ -174,6 +178,22 @@ class TopologicalEvaluator:
         conflict_ratio = (global_hull_area - actual_mask_area) / global_hull_area
         return max(0.0, min(1.0, conflict_ratio))
 
+    def _should_absorb_identical_geometry(self, skill, same_label_text, similarity, semantic_match, anchor_sep):
+        if same_label_text and anchor_sep > self.DUP_TEXT_ANCHOR_SEP_THRESHOLD:
+            return False
+        if similarity >= self.TEXT_ABSORB_SIM_THRESHOLD:
+            return True
+        if skill == "TEXT":
+            return False
+        return semantic_match
+
+    def _should_absorb_containment(self, skill, similarity, semantic_match):
+        if skill in {"OBJECT", "AUTO"}:
+            return True
+        if skill == "TEXT":
+            return semantic_match or similarity >= self.TEXT_ABSORB_SIM_THRESHOLD
+        return semantic_match
+
     def _calculate_semantic_divergence(self, labels):
         if labels is None or len(labels) < 2:
             return 0.0
@@ -256,33 +276,28 @@ class TopologicalEvaluator:
                 # Rule 2 + Rule 3: identical geometry requires semantic approval,
                 # and far duplicate anchors must stay separate.
                 if same_shape:
-                    if same_label_text and valid_anchors is not None:
-                        sep = self._pair_anchor_distance(valid_anchors[i], valid_anchors[j], image_size)
-                        if sep > self.DUP_TEXT_ANCHOR_SEP_THRESHOLD:
-                            continue
-
-                    allow_low_similarity_absorb = semantic_match and skill != "TEXT"
-                    should_absorb = (
-                        similarity >= self.TEXT_ABSORB_SIM_THRESHOLD
-                        or allow_low_similarity_absorb
+                    sep = (
+                        self._pair_anchor_distance(valid_anchors[i], valid_anchors[j], image_size)
+                        if valid_anchors is not None
+                        else 0.0
                     )
-                    if should_absorb:
+                    if self._should_absorb_identical_geometry(
+                        skill=skill,
+                        same_label_text=same_label_text,
+                        similarity=similarity,
+                        semantic_match=semantic_match,
+                        anchor_sep=sep,
+                    ):
                         is_absorbed = True
                         break
                     continue
 
                 # Rule 1: containment behavior controlled by predicted skill.
-                if skill in {"OBJECT", "AUTO"}:
-                    is_absorbed = True
-                    break
-                if skill == "TEXT":
-                    if semantic_match or similarity >= self.TEXT_ABSORB_SIM_THRESHOLD:
-                        is_absorbed = True
-                        break
-                    continue
-
-                # COLOR / COUNT default policy: absorb only semantically similar containment.
-                if semantic_match:
+                if self._should_absorb_containment(
+                    skill=skill,
+                    similarity=similarity,
+                    semantic_match=semantic_match,
+                ):
                     is_absorbed = True
                     break
 
@@ -333,7 +348,7 @@ class TopologicalEvaluator:
             + (self.W3 * tie_breaker_divergence)
         )
         if skill == "OBJECT":
-            d_score *= 0.5
+            d_score *= self.OBJECT_DAMPING_FACTOR
 
         classification = 0 if d_score >= self.threshold else 1
         return classification, d_score

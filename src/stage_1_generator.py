@@ -141,17 +141,17 @@ class Stage1Generator:
         text_patterns = [
             r"\btext\b", r"\blabel\b", r"\bwriting\b", r"\bword\b", r"\bwords\b",
             r"\bbrand\b", r"\bname\b", r"\bread\b", r"\bsay\b", r"\bwritten\b",
-            r"\bletter\b", r"\bletters\b", r"\bnumber\b", r"\bnumbers\b",
+            r"\bletter\b", r"\bletters\b",
         ]
         color_patterns = [r"\bcolor\b", r"\bcolour\b", r"\bshade\b", r"\bhue\b"]
         count_patterns = [
             r"\bhow many\b", r"\bnumber of\b", r"\bcount\b",
         ]
 
-        if any(re.search(p, q) for p in text_patterns):
-            return QuestionSkill.TEXT.value
         if any(re.search(p, q) for p in count_patterns):
             return QuestionSkill.COUNT.value
+        if any(re.search(p, q) for p in text_patterns):
+            return QuestionSkill.TEXT.value
         if any(re.search(p, q) for p in color_patterns):
             return QuestionSkill.COLOR.value
         return QuestionSkill.OBJECT.value
